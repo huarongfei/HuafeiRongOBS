@@ -72,3 +72,19 @@ E7 保存/加载：建画布→保存 profile→重启→还原（名称/场景/
 - frontend/CMakeLists.txt 登记源文件；OBSBasic.cpp 菜单"工具"加 action
 - 增量编译验证；若渲染无内容 → 查 texture_rendered/ACTIVATE 时机
 验收：窗口显示与主节目一致画面（克隆1）；帧率流畅；关闭窗口无崩溃（mix 正常释放）。
+
+## E1/E2 补丁合入状态（v2，等待人工运行验收）
+- 补丁文件：frontend/widgets/HFRSpike.{hpp,cpp}；菜单 HFR(M1) 登记于 OBSBasic::OBSInit；
+  env HFR_E1_AUTO=1 → 4s 后自动开 E1。
+- E1（克隆）：obs_canvas_create("HFR-E1",960x540, ACTIVATE|SCENE_REF) + 通道0=当前主场景源 + 独立窗口绘制画布纹理。
+- E2（独立）：同尺寸画布 + obs_canvas_scene_create("E2 Scene") + color_source_v3 色块 + OBS_BOUNDS_STRETCH 铺满。
+- 日志探针一律用 blog(LOG_INFO,"[HFR-...]")（进 obs 日志），不再用 fopen 外部文件。
+- 待人工验收项见 docs/晨间验收清单.md。
+
+## 调试教训（重要，写进 ADR 思路）
+1) **自动化启动曾致"伪崩溃"**：后台 Start-Process + 强杀会留下崩溃对话框/脏配置；
+   用户手动双击启动正常。→ 运行期验证以"人工启动 + obs 日志"为准；自动化只做构建与静态检查。
+2) **增量构建可被污染**：多次 reconfigure/编改后出现"连原始代码都早崩"；
+   --clean-first（或删 build_x64 全量）可恢复。→ 涉及源码列表/头文件的改动后若异常，先 clean。
+3) **obs 运行期 canvas 创建的真实性待人工确认**：源码显示 obs_canvas_create 会向 obs->video.mixes
+   推入新 mix（output_frames 每帧遍历渲染），API 层面成立；是否所有时机安全由 E1/E2 运行结果判定。
