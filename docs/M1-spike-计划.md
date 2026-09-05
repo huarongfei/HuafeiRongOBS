@@ -56,3 +56,19 @@ E7 保存/加载：建画布→保存 profile→重启→还原（名称/场景/
 - **obs_canvas_render(canvas)** 已实现（obs-canvas.c:589），obs.c 已有主画布纹理渲染内部函数（obs_render_canvas_texture_internal ~2170）——
   说明"画布→纹理"的原语已具备；缺的是"谁在每帧调度 N 个画布渲染 + 分档跳过"（我们新增）。
 - obs-video.c 关键函数行号：output_frames(916)、render_video(539)、update_active_states(1076/1054)、obs_graphics_thread_loop(1097)。
+
+## E1 补丁设计（定稿，待实施）
+目标：菜单"工具 → HFR-E1 第二画布窗口"→ 弹出独立小窗显示"额外画布"的实时画面（内容先镜像主节目=克隆语义演示）。
+依据（源码核实）：
+- obs_canvas_create(name, ovi, PROGRAM) 运行期可调用；内部 obs_create_video_mix(ovi) 并把 mix 压入 obs->video.mixes、
+  mix->view = &canvas->view（obs-canvas.c:138-171）。output_frames() 每帧遍历 mixes → 画布自动渲染进自身 mix->render_texture（obs-video.c:916）。
+- obs_render_canvas_texture(canvas) 公开可把任意画布 mix->render_texture 画到当前 gs target（obs.c:2234；guard texture_rendered）。
+- flags：enum obs_canvas_flags { MAIN, ACTIVATE, MIX_AUDIO, SCENE_REF, EPHEMERAL, PROGRAM=ACTIVATE|MIX_AUDIO|SCENE_REF, ... }（obs.h:2604）。
+- 通道：obs_canvas_set_channel(canvas, 0, sceneSource)；克隆演示 = channel0 放当前主场景源。
+- 窗口：仿 OBSProjector —— OBSQTDisplay 子类 + obs_display_add_draw_callback(display, OBSRender, this)；
+  OBSRender 内 obs_render_canvas_texture(canvas)；Esc 关闭即 obs_canvas_remove+release（沿用 OBSCanvas RAII 语义）。
+实施文件（拟）：
+- 新增 frontend/widgets/HFRSpike.{hpp,cpp}（临时 spike 类，M1 结束可删）
+- frontend/CMakeLists.txt 登记源文件；OBSBasic.cpp 菜单"工具"加 action
+- 增量编译验证；若渲染无内容 → 查 texture_rendered/ACTIVATE 时机
+验收：窗口显示与主节目一致画面（克隆1）；帧率流畅；关闭窗口无崩溃（mix 正常释放）。
