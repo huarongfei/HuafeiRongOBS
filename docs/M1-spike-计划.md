@@ -99,3 +99,8 @@ E7 保存/加载：建画布→保存 profile→重启→还原（名称/场景/
 - S3：克隆窗并入矩阵格、安全区/LUT、输出(推流/录制)绑定面板。
 - 说明：新建画布目前为空场景（投影为黑），S2 提供"填充色块/放素材"测试手段。
 文件：frontend/widgets/HFRConsole.{hpp,cpp}（替代 HFRSpike.*）。
+
+## S2.x 增量（已完成并提交）
+- 新建画布弹窗：名称 + 基础分辨率（1280x720 / 1920x1080 / 960x540 / 2560x1440；帧率随全局）
+- 画布重命名（主画布除外，obs_canvas_set_name）
+- 关闭时序修复：aboutToQuit → HFRConsoleDock::CleanupForShutdown()（关投影 + 释放全部用户画布），消除与 obs_shutdown 的销毁竞争（用户已复测通过）
