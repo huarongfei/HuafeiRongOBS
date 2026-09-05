@@ -1,0 +1,11 @@
+# 构建与源码（嵌套仓库/大目录不入库）
+obs-src/
+build_x64/
+logs/
+.deps/
+
+# 常规
+*.user
+*.suo
+.vs/
+Thumbs.db
