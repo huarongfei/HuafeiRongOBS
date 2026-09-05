@@ -46,3 +46,13 @@ E7 保存/加载：建画布→保存 profile→重启→还原（名称/场景/
 ## 已知风险
 - canvas API unstable：实验代码只做验证用途，不沉淀进主分支设计依赖。
 - 本机 Vega8：E1/E3 性能只做定性，不做基准。
+
+## 附：M0 阶段初步代码勘察（build 期间，非结论性，供 spike 参照）
+- **帧循环已是多 mix 结构**：obs->video.mixes 为 obs_core_video_mix 数组；
+  obs_graphics_thread_loop 每帧 = update_active_states → tick_sources → output_frames()（按 mix 出帧）→ render_displays()。
+  → hfr-canvas-scheduler 的挂载点候选：output_frames 阶段或其后、render_displays 前的"画布渲染"通道（待 E1 验证）。
+- **canvas ≈ mix + view + 场景集**：obs-canvas.c 内 canvas 持 mix（video 输出）与 view（channels，供 obs_canvas_set_channel/渲染取用）；
+  obs_canvas_get_video() = mix->video；obs_canvas_reset_video() 仅当 !obs_video_active() 且非 MAIN 时可调。
+- **obs_canvas_render(canvas)** 已实现（obs-canvas.c:589），obs.c 已有主画布纹理渲染内部函数（obs_render_canvas_texture_internal ~2170）——
+  说明"画布→纹理"的原语已具备；缺的是"谁在每帧调度 N 个画布渲染 + 分档跳过"（我们新增）。
+- obs-video.c 关键函数行号：output_frames(916)、render_video(539)、update_active_states(1076/1054)、obs_graphics_thread_loop(1097)。
