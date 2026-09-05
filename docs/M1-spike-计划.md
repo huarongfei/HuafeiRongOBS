@@ -104,3 +104,8 @@ E7 保存/加载：建画布→保存 profile→重启→还原（名称/场景/
 - 新建画布弹窗：名称 + 基础分辨率（1280x720 / 1920x1080 / 960x540 / 2560x1440；帧率随全局）
 - 画布重命名（主画布除外，obs_canvas_set_name）
 - 关闭时序修复：aboutToQuit → HFRConsoleDock::CleanupForShutdown()（关投影 + 释放全部用户画布），消除与 obs_shutdown 的销毁竞争（用户已复测通过）
+
+## S3a~ 增量（已提交）
+- S3a：投影受管（画布×屏 去重、单画布停止、删除画布自动关其投影、状态计数）
+- 双击画布行 → 一键投影到主屏
+- 退出销毁排空：CleanupForShutdown 用 weak-canvas 轮询等待销毁完成（消除与 obs_shutdown 竞争）
