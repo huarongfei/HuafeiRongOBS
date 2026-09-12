@@ -30,3 +30,15 @@
 ## ADR-004 音频与输出语义（设计方向，M2/M3 待细化）
 - 画布不带 MIX_AUDIO = 该画布声音不进总输出；为将来"每输出独立混音"保留空间（按 Sink 选混音组）。
 - Sink 绑定模型：Sink.bind(canvas)=克隆（共享纹理，独立裁切/缩放/安全区）；改绑即独立接管；PGM=主画布。
+
+## ADR-005 画布/场景销毁时序（退出崩溃 c0000005 的最终修法）
+- 现象：退出时 tiny_tubular_task_thread 在 scene_destroy → obs_sceneitem_destroy → obs_source_release 崩溃，
+  主线程此时在 obs_shutdown → obs_free_data → os_task_queue_wait。
+- 根因：用户画布的场景/源属于"画布私有"，其销毁被延迟排队；而 obs_free_data 会先释放全局
+  sources / canvases 哈希表，残留的画布场景在之后销毁时引用了已释放的源 → AV。
+  仅靠 aboutToQuit 里 obs_canvas_remove/release 不够：画布对象还被 obs->data.canvases 哈希表持有，
+  weak 轮询也等不到销毁（会白等超时）。
+- 修法（HFRConsoleDock::CleanupForShutdown）：
+  1) 关闭全部投影窗；2) 对每个用户画布：清空通道0 → 枚举并 obs_canvas_scene_remove 其场景 → obs_canvas_remove/release；
+  3) 调用官方 **obs_wait_for_destroy_queue()**（obs.h:935）排空销毁队列（调两次更稳）后再让流程进入 obs_shutdown。
+- 影响：运行时删除画布（RemoveSelectedCanvas）复用同一 TeardownUserCanvas 逻辑，路径一致。
