@@ -1,0 +1,641 @@
+From 1c91f3886f30e2367d413e7f6203c14d02c4aad3 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:38:41 +0800
+Subject: [PATCH 04/19] =?UTF-8?q?feat(UI):=20S1=20embedded=20output-matrix?=
+ =?UTF-8?q?=20dock=20=E2=80=94=20display=20numbering,=20canvas=20list=20(m?=
+ =?UTF-8?q?ain+user),=20create/remove,=20project-to-screen#,=20managed=20p?=
+ =?UTF-8?q?rojectors?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/cmake/ui-widgets.cmake |   4 +-
+ frontend/widgets/HFRConsole.cpp | 277 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRConsole.hpp |  67 ++++++++
+ frontend/widgets/HFRSpike.cpp   | 155 ------------------
+ frontend/widgets/HFRSpike.hpp   |  29 ----
+ frontend/widgets/OBSBasic.cpp   |  26 ++-
+ 6 files changed, 357 insertions(+), 201 deletions(-)
+ create mode 100644 frontend/widgets/HFRConsole.cpp
+ create mode 100644 frontend/widgets/HFRConsole.hpp
+ delete mode 100644 frontend/widgets/HFRSpike.cpp
+ delete mode 100644 frontend/widgets/HFRSpike.hpp
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index ed62a0a..1927734 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -57,8 +57,8 @@ target_sources(
+     widgets/OBSProjector.hpp
+     widgets/OBSQTDisplay.cpp
+     widgets/OBSQTDisplay.hpp
+-    widgets/HFRSpike.cpp
+-    widgets/HFRSpike.hpp
++    widgets/HFRConsole.cpp
++    widgets/HFRConsole.hpp
+     widgets/StatusBarWidget.cpp
+     widgets/StatusBarWidget.hpp
+ )
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+new file mode 100644
+index 0000000..60ac2e7
+--- /dev/null
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -0,0 +1,277 @@
++#include "HFRConsole.hpp"
++
++#include <QAction>
++#include <QGuiApplication>
++#include <QHBoxLayout>
++#include <QLabel>
++#include <QListWidget>
++#include <QPushButton>
++#include <QScreen>
++#include <QVBoxLayout>
++#include <QVariant>
++
++#include <obs-module.h>
++
++HFRConsoleDock *HFRConsoleDock::s_instance = nullptr;
++
++static void HfrLog(const char *msg)
++{
++	blog(LOG_INFO, "[HFR] %s", msg);
++}
++
++/* ------------------------- HFRCanvasProjector ------------------------- */
++
++HFRCanvasProjector::HFRCanvasProjector(obs_canvas_t *canvas_, QScreen *screen, QWidget *parent)
++	: OBSQTDisplay(parent), canvas(canvas_)
++{
++	int idx = QGuiApplication::screens().indexOf(screen);
++	QString title;
++	if (canvas && screen) {
++		title = QStringLiteral("%1 → 屏%2 (%3)")
++				.arg(QString::fromUtf8(obs_canvas_get_name(canvas)))
++				.arg(idx)
++				.arg(screen->name());
++	} else {
++		title = QStringLiteral("画布投影");
++	}
++	setWindowTitle(title);
++	setAttribute(Qt::WA_DeleteOnClose, true);
++	setAttribute(Qt::WA_QuitOnClose, false);
++
++	QAction *escapeAction = new QAction(this);
++	escapeAction->setShortcut(Qt::Key_Escape);
++	addAction(escapeAction);
++	connect(escapeAction, &QAction::triggered, this, &QWidget::close);
++
++	auto addDraw = [this]() {
++		obs_display_add_draw_callback(GetDisplay(), &HFRCanvasProjector::Draw, this);
++		obs_display_set_background_color(GetDisplay(), 0x000000);
++	};
++	connect(this, &OBSQTDisplay::DisplayCreated, this, addDraw);
++
++	ready = true;
++	if (screen) {
++		setGeometry(screen->geometry());
++		showFullScreen();
++	} else {
++		resize(640, 360);
++		show();
++	}
++	raise();
++	activateWindow();
++}
++
++HFRCanvasProjector::~HFRCanvasProjector()
++{
++	if (GetDisplay()) {
++		obs_display_remove_draw_callback(GetDisplay(), &HFRCanvasProjector::Draw, this);
++	}
++}
++
++void HFRCanvasProjector::Draw(void *data, uint32_t, uint32_t)
++{
++	HFRCanvasProjector *window = static_cast<HFRCanvasProjector *>(data);
++	if (!window || !window->ready || !window->canvas) {
++		return;
++	}
++	obs_render_canvas_texture(window->canvas);
++}
++
++/* --------------------------- HFRConsoleDock --------------------------- */
++
++HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
++{
++	s_instance = this;
++	setWindowTitle(QStringLiteral("输出矩阵（画布）"));
++	setObjectName(QStringLiteral("hfrOutputMatrixDock"));
++
++	QWidget *panel = new QWidget(this);
++	QVBoxLayout *layout = new QVBoxLayout(panel);
++	layout->setContentsMargins(4, 4, 4, 4);
++
++	layout->addWidget(new QLabel(QStringLiteral("显示器（编号）"), panel));
++	monitorList = new QListWidget(panel);
++	layout->addWidget(monitorList);
++
++	layout->addWidget(new QLabel(QStringLiteral("画布（点击选中=操作作用域）"), panel));
++	canvasList = new QListWidget(panel);
++	layout->addWidget(canvasList);
++
++	QHBoxLayout *btnRow = new QHBoxLayout();
++	btnRefresh = new QPushButton(QStringLiteral("刷新屏/画布"), panel);
++	btnNew = new QPushButton(QStringLiteral("+ 新建画布"), panel);
++	btnRemove = new QPushButton(QStringLiteral("删除画布"), panel);
++	btnRow->addWidget(btnRefresh);
++	btnRow->addWidget(btnNew);
++	btnRow->addWidget(btnRemove);
++	layout->addLayout(btnRow);
++
++	QHBoxLayout *projRow = new QHBoxLayout();
++	btnProject = new QPushButton(QStringLiteral("▶ 投影到选中屏"), panel);
++	btnStopAll = new QPushButton(QStringLiteral("■ 关闭所有投影"), panel);
++	projRow->addWidget(btnProject);
++	projRow->addWidget(btnStopAll);
++	layout->addLayout(projRow);
++
++	status = new QLabel(QStringLiteral("就绪"), panel);
++	status->setWordWrap(true);
++	layout->addWidget(status);
++
++	setWidget(panel);
++
++	connect(btnRefresh, &QPushButton::clicked, this, [this]() {
++		RefreshMonitors();
++		RefreshCanvasList();
++	});
++	connect(btnNew, &QPushButton::clicked, this, [this]() { CreateCanvas(); });
++	connect(btnRemove, &QPushButton::clicked, this, [this]() { RemoveSelectedCanvas(); });
++	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
++	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
++
++	RefreshMonitors();
++	RefreshCanvasList();
++}
++
++HFRConsoleDock::~HFRConsoleDock()
++{
++	CloseAllProjectors();
++	for (obs_canvas_t *cv : canvases) {
++		if (cv) {
++			obs_canvas_remove(cv);
++			obs_canvas_release(cv);
++		}
++	}
++	canvases.clear();
++	s_instance = nullptr;
++}
++
++void HFRConsoleDock::RefreshMonitors()
++{
++	monitorList->clear();
++	const auto screens = QGuiApplication::screens();
++	for (int i = 0; i < screens.size(); i++) {
++		QScreen *s = screens.at(i);
++		QString label = QStringLiteral("#%1  %2  %3x%4%5")
++					.arg(i)
++					.arg(s->name())
++					.arg(s->geometry().width())
++					.arg(s->geometry().height())
++					.arg(s == QGuiApplication::primaryScreen() ? QStringLiteral("  [主]") : QString());
++		monitorList->addItem(label);
++	}
++	status->setText(QStringLiteral("检测到 %1 块显示器；请先在系统里接好外接屏后点“刷新”").arg(screens.size()));
++}
++
++void HFRConsoleDock::AddCanvasRow(obs_canvas_t *cv, const QString &label)
++{
++	QListWidgetItem *item = new QListWidgetItem(label, canvasList);
++	item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(cv)));
++}
++
++void HFRConsoleDock::RefreshCanvasList()
++{
++	canvasList->clear();
++	obs_canvas_t *mainCanvas = obs_get_main_canvas();
++	if (mainCanvas) {
++		struct obs_video_info ovi;
++		QString size = QStringLiteral("?");
++		if (obs_canvas_get_video_info(mainCanvas, &ovi)) {
++			size = QStringLiteral("%1x%2").arg(ovi.base_width).arg(ovi.base_height);
++		}
++		AddCanvasRow(mainCanvas, QStringLiteral("★ 主画布  (%1)").arg(size));
++		obs_canvas_release(mainCanvas);
++	}
++	for (obs_canvas_t *cv : canvases) {
++		struct obs_video_info ovi;
++		QString size = QStringLiteral("?");
++		if (cv && obs_canvas_get_video_info(cv, &ovi)) {
++			size = QStringLiteral("%1x%2").arg(ovi.base_width).arg(ovi.base_height);
++		}
++		AddCanvasRow(cv, QStringLiteral("%1  (%2)").arg(QString::fromUtf8(obs_canvas_get_name(cv))).arg(size));
++	}
++	if (canvasList->count() > 0) {
++		canvasList->setCurrentRow(0);
++	}
++}
++
++obs_canvas_t *HFRConsoleDock::CanvasFromRow(int row) const
++{
++	QListWidgetItem *item = canvasList->item(row);
++	if (!item) {
++		return nullptr;
++	}
++	return reinterpret_cast<obs_canvas_t *>(
++		static_cast<quintptr>(item->data(Qt::UserRole).toULongLong()));
++}
++
++void HFRConsoleDock::CreateCanvas()
++{
++	struct obs_video_info ovi = {};
++	obs_get_video_info(&ovi);
++	ovi.base_width = 1280;
++	ovi.base_height = 720;
++
++	obs_canvas_t *cv = obs_canvas_create("画布", &ovi, ACTIVATE | SCENE_REF);
++	if (!cv) {
++		status->setText(QStringLiteral("新建画布失败"));
++		return;
++	}
++	canvases.append(cv); /* 持有 create 返回的引用 */
++	RefreshCanvasList();
++	canvasList->setCurrentRow(canvasList->count() - 1);
++	HfrLog("created canvas");
++	status->setText(QStringLiteral("已新建画布：%1").arg(QString::fromUtf8(obs_canvas_get_name(cv))));
++}
++
++void HFRConsoleDock::RemoveSelectedCanvas()
++{
++	int row = canvasList->currentRow();
++	obs_canvas_t *cv = CanvasFromRow(row);
++	if (!cv) {
++		return;
++	}
++	if (cv == obs_get_main_canvas()) {
++		status->setText(QStringLiteral("主画布不可删除"));
++		return;
++	}
++	if (!canvases.contains(cv)) {
++		return;
++	}
++	CloseAllProjectors(); /* 简化：先关全部投影再删 */
++	canvases.removeAll(cv);
++	obs_canvas_remove(cv);
++	obs_canvas_release(cv);
++	RefreshCanvasList();
++	HfrLog("removed canvas");
++	status->setText(QStringLiteral("已删除画布"));
++}
++
++void HFRConsoleDock::ProjectSelected()
++{
++	int cRow = canvasList->currentRow();
++	int mRow = monitorList->currentRow();
++	obs_canvas_t *cv = CanvasFromRow(cRow);
++	if (!cv) {
++		status->setText(QStringLiteral("请先选中画布"));
++		return;
++	}
++	const auto screens = QGuiApplication::screens();
++	if (mRow < 0 || mRow >= screens.size()) {
++		status->setText(QStringLiteral("请先选中显示器编号"));
++		return;
++	}
++	HFRCanvasProjector *w = new HFRCanvasProjector(cv, screens.at(mRow), nullptr);
++	projectors.append(w);
++	HfrLog("projected canvas to screen");
++	status->setText(QStringLiteral("已投影 %1 → 屏%2").arg(QString::fromUtf8(obs_canvas_get_name(cv))).arg(mRow));
++}
++
++void HFRConsoleDock::CloseAllProjectors()
++{
++	for (QPointer<HFRCanvasProjector> &p : projectors) {
++		if (p) {
++			p->close();
++		}
++	}
++	projectors.clear();
++}
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+new file mode 100644
+index 0000000..b732be3
+--- /dev/null
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include "OBSQTDisplay.hpp"
++
++#include <obs.hpp>
++
++#include <QDockWidget>
++#include <QPointer>
++#include <QVector>
++
++class QListWidget;
++class QPushButton;
++class QLabel;
++class QScreen;
++
++/* ============================================================
++ * HuafeiRongOBS 嵌入式多画布 UI（M4 方向，S1 骨架）
++ * 目标交互（与产品方确认）：
++ *   - 右侧输出矩阵为主：检测外接屏并显示编号，用户选编号即可投影画布到对应屏；
++ *   - 画布/投影全部受管（无散窗）：退出统一关闭，避免与 obs_shutdown 竞争。
++ * 本 S1：显示器编号列表 + 画布列表(含主画布) + 新建/删除 + 按编号全屏投影。
++ * ============================================================ */
++
++/* 画布投影窗：指定画布 → 指定编号显示器（全屏、受管） */
++class HFRCanvasProjector : public OBSQTDisplay {
++public:
++	HFRCanvasProjector(obs_canvas_t *canvas, QScreen *screen, QWidget *parent = nullptr);
++	~HFRCanvasProjector() override;
++
++private:
++	static void Draw(void *data, uint32_t cx, uint32_t cy);
++	obs_canvas_t *canvas = nullptr;
++	bool ready = false;
++};
++
++/* 输出矩阵 / 导播坞 */
++class HFRConsoleDock : public QDockWidget {
++public:
++	explicit HFRConsoleDock(QWidget *parent = nullptr);
++	~HFRConsoleDock() override;
++
++	static HFRConsoleDock *Get() { return s_instance; }
++
++	void RefreshMonitors();
++	void RefreshCanvasList();
++	void CreateCanvas();
++	void RemoveSelectedCanvas();
++	void ProjectSelected();
++	void CloseAllProjectors();
++
++private:
++	obs_canvas_t *CanvasFromRow(int row) const;
++	void AddCanvasRow(obs_canvas_t *cv, const QString &label);
++
++	QListWidget *monitorList = nullptr;
++	QListWidget *canvasList = nullptr;
++	QPushButton *btnRefresh = nullptr;
++	QPushButton *btnNew = nullptr;
++	QPushButton *btnRemove = nullptr;
++	QPushButton *btnProject = nullptr;
++	QPushButton *btnStopAll = nullptr;
++	QLabel *status = nullptr;
++
++	QVector<obs_canvas_t *> canvases;                 /* 本坞创建/持有的用户画布（强引用）；主画布不入列 */
++	QVector<QPointer<HFRCanvasProjector>> projectors; /* 受管投影窗 */
++	static HFRConsoleDock *s_instance;
++};
+diff --git a/frontend/widgets/HFRSpike.cpp b/frontend/widgets/HFRSpike.cpp
+deleted file mode 100644
+index 4656f46..0000000
+--- a/frontend/widgets/HFRSpike.cpp
++++ /dev/null
+@@ -1,155 +0,0 @@
+-#include "HFRSpike.hpp"
+-
+-#include "OBSBasic.hpp"
+-
+-#include <QAction>
+-#include <QPointer>
+-
+-#include <obs-module.h>
+-
+-static QPointer<HFRCanvasWindow> s_e1;
+-static QPointer<HFRCanvasWindow> s_e2;
+-
+-static void HfrLog(const char *tag, const char *msg)
+-{
+-	blog(LOG_INFO, "[HFR-%s] %s", tag, msg);
+-}
+-
+-HFRCanvasWindow::HFRCanvasWindow(obs_canvas_t *canvas_, const QString &title, QWidget *parent)
+-	: OBSQTDisplay(parent), canvas(canvas_)
+-{
+-	setWindowTitle(title);
+-	resize(640, 360);
+-	setAttribute(Qt::WA_DeleteOnClose, true);
+-	setAttribute(Qt::WA_QuitOnClose, false);
+-
+-	QAction *escapeAction = new QAction(this);
+-	escapeAction->setShortcut(Qt::Key_Escape);
+-	addAction(escapeAction);
+-	connect(escapeAction, &QAction::triggered, this, &QWidget::close);
+-
+-	auto addDrawCallback = [this]() {
+-		obs_display_add_draw_callback(GetDisplay(), &HFRCanvasWindow::Draw, this);
+-		obs_display_set_background_color(GetDisplay(), 0x000000);
+-	};
+-	connect(this, &OBSQTDisplay::DisplayCreated, this, addDrawCallback);
+-
+-	ready = true;
+-	show();
+-	raise();
+-	activateWindow();
+-}
+-
+-HFRCanvasWindow::~HFRCanvasWindow()
+-{
+-	if (GetDisplay()) {
+-		obs_display_remove_draw_callback(GetDisplay(), &HFRCanvasWindow::Draw, this);
+-	}
+-	if (canvas) {
+-		obs_canvas_remove(canvas);
+-		obs_canvas_release(canvas);
+-		canvas = nullptr;
+-	}
+-}
+-
+-void HFRCanvasWindow::Draw(void *data, uint32_t, uint32_t)
+-{
+-	HFRCanvasWindow *window = static_cast<HFRCanvasWindow *>(data);
+-	if (!window || !window->ready || !window->canvas) {
+-		return;
+-	}
+-	obs_render_canvas_texture(window->canvas);
+-}
+-
+-static obs_canvas_t *CreateHfrCanvas(const char *name, uint32_t baseW, uint32_t baseH)
+-{
+-	struct obs_video_info ovi = {};
+-	obs_get_video_info(&ovi);
+-	ovi.base_width = baseW;
+-	ovi.base_height = baseH;
+-	return obs_canvas_create(name, &ovi, ACTIVATE | SCENE_REF);
+-}
+-
+-static void OpenWindowFor(obs_canvas_t *cv, const QString &title, QPointer<HFRCanvasWindow> &slot)
+-{
+-	if (slot) {
+-		slot->raise();
+-		slot->activateWindow();
+-		return;
+-	}
+-	if (!cv) {
+-		return;
+-	}
+-	slot = new HFRCanvasWindow(cv, title, nullptr);
+-}
+-
+-void HFRCanvasWindow::OpenE1()
+-{
+-	HfrLog("E1", "open: clone canvas from current scene source");
+-	OBSBasic *main = OBSBasic::Get();
+-	if (!main) {
+-		return;
+-	}
+-	if (s_e1) {
+-		s_e1->raise();
+-		s_e1->activateWindow();
+-		return;
+-	}
+-	obs_canvas_t *cv = CreateHfrCanvas("HFR-E1", 960, 540);
+-	if (!cv) {
+-		HfrLog("E1", "obs_canvas_create failed");
+-		return;
+-	}
+-	OBSSource curScene = main->GetCurrentSceneSource();
+-	if (curScene) {
+-		obs_canvas_set_channel(cv, 0, curScene);
+-	}
+-	OpenWindowFor(cv, QStringLiteral("HFR-E1 Canvas (clone demo)"), s_e1);
+-	HfrLog("E1", "window created");
+-}
+-
+-void HFRCanvasWindow::OpenE2()
+-{
+-	HfrLog("E2", "open: independent canvas with own color scene");
+-	if (s_e2) {
+-		s_e2->raise();
+-		s_e2->activateWindow();
+-		return;
+-	}
+-	obs_canvas_t *cv = CreateHfrCanvas("HFR-E2", 960, 540);
+-	if (!cv) {
+-		HfrLog("E2", "obs_canvas_create failed");
+-		return;
+-	}
+-
+-	obs_scene_t *sc = obs_canvas_scene_create(cv, "E2 Scene");
+-	if (sc) {
+-		obs_data_t *s = obs_data_create();
+-		obs_data_set_int(s, "color", 0xFF00C8FF); /* 亮青 */
+-		obs_data_set_int(s, "width", 1920);
+-		obs_data_set_int(s, "height", 1080);
+-		obs_source_t *cs = obs_source_create("color_source_v3", "E2 Color", s, nullptr);
+-		obs_data_release(s);
+-		if (cs) {
+-			obs_sceneitem_t *item = obs_scene_add(sc, cs);
+-			if (item) {
+-				obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
+-				struct vec2 sz = {960.0f, 540.0f};
+-				obs_sceneitem_set_bounds(item, &sz);
+-			}
+-			obs_source_release(cs);
+-		}
+-		obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
+-	}
+-	OpenWindowFor(cv, QStringLiteral("HFR-E2 Canvas (independent demo)"), s_e2);
+-	HfrLog("E2", "window created");
+-}
+-void HFRCanvasWindow::CloseAll()
+-{
+-	if (s_e1) {
+-		s_e1->close();
+-	}
+-	if (s_e2) {
+-		s_e2->close();
+-	}
+-}
+diff --git a/frontend/widgets/HFRSpike.hpp b/frontend/widgets/HFRSpike.hpp
+deleted file mode 100644
+index 8df3e2e..0000000
+--- a/frontend/widgets/HFRSpike.hpp
++++ /dev/null
+@@ -1,29 +0,0 @@
+-#pragma once
+-
+-#include "OBSQTDisplay.hpp"
+-
+-#include <obs.hpp>
+-
+-/* ============================================================
+- * HFR M1 spike（temporary, milestone M1）
+- * 复用上游 obs_canvas 的运行时能力做最小演示：
+- *   E1 第二画布窗口（克隆）：canvas 通道0 = 当前主场景源 → 独立窗口显示同一画面。
+- *   E2 第二画布窗口（独立）：canvas 自带场景 + 色块源 → 独立窗口显示不同内容。
+- * 窗口 = OBSQTDisplay 子类 + obs_render_canvas_texture(canvas) 绘制该画布 mix 纹理。
+- * 说明：canvas flags 用 ACTIVATE|SCENE_REF（不含 MIX_AUDIO，避免音频重复）。
+- * ============================================================ */
+-class HFRCanvasWindow : public OBSQTDisplay {
+-public:
+-	HFRCanvasWindow(obs_canvas_t *canvas, const QString &title, QWidget *parent = nullptr);
+-	~HFRCanvasWindow() override;
+-
+-	static void OpenE1(); /* clone demo */
+-	static void OpenE2(); /* independent color-canvas demo */
+-	static void CloseAll(); /* 退出前主动关闭演示窗口，避免与 obs_shutdown 竞争 */
+-
+-private:
+-	static void Draw(void *data, uint32_t cx, uint32_t cy);
+-
+-	obs_canvas_t *canvas = nullptr;
+-	bool ready = false;
+-};
+\ No newline at end of file
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index f0978ee..6c3de9a 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -21,7 +21,7 @@
+ #include "ui-config.h"
+ 
+ #include "ColorSelect.hpp"
+-#include "HFRSpike.hpp"
++#include "HFRConsole.hpp"
+ #include "OBSBasicControls.hpp"
+ #include "OBSBasicStats.hpp"
+ #include "plugin-manager/PluginManager.hpp"
+@@ -1035,22 +1035,18 @@ void OBSBasic::OBSInit()
+ 	InitHotkeys();
+ 	ui->preview->Init();
+ 
+-	/* HFR M1 spike (temporary): second-canvas demos */
++	/* HuafeiRongOBS：输出矩阵 / 导播坞（多画布嵌入式 UI） */
+ 	{
+-		blog(LOG_INFO, "[HFR] obsinit: registering HFR(M1) menu, env_auto=%d",
+-		     (int)qEnvironmentVariableIsSet("HFR_E1_AUTO"));
+-		QMenu *hfrMenu = new QMenu(QStringLiteral("HFR(M1)"), this);
+-		QAction *e1Act = hfrMenu->addAction(QStringLiteral("E1: 第二画布窗口（克隆演示）"));
+-		QAction *e2Act = hfrMenu->addAction(QStringLiteral("E2: 第二画布窗口（独立色块）"));
+-		connect(e1Act, &QAction::triggered, this, []() { HFRCanvasWindow::OpenE1(); });
+-		connect(e2Act, &QAction::triggered, this, []() { HFRCanvasWindow::OpenE2(); });
+-		menuBar()->addMenu(hfrMenu);
+-		if (qEnvironmentVariableIsSet("HFR_E1_AUTO")) {
+-			QTimer::singleShot(4000, []() { HFRCanvasWindow::OpenE1(); });
+-		}
+-		/* 退出前先关演示窗口，避免画布释放与 obs_shutdown 竞争（曾致 c0000005） */
++		blog(LOG_INFO, "[HFR] obsinit: creating output matrix dock");
++		HFRConsoleDock *hfrDock = new HFRConsoleDock(this);
++		hfrDock->setObjectName(QStringLiteral("hfrOutputMatrixDock"));
++		addDockWidget(Qt::RightDockWidgetArea, hfrDock);
++		hfrDock->show();
++		/* 退出前先关投影窗，避免画布释放与 obs_shutdown 竞争（曾致 c0000005） */
+ 		connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, []() {
+-			HFRCanvasWindow::CloseAll();
++			if (HFRConsoleDock::Get()) {
++				HFRConsoleDock::Get()->CloseAllProjectors();
++			}
+ 		});
+ 	}
+ 
+-- 
+2.55.0.windows.5
+

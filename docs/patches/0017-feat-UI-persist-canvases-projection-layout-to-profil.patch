@@ -1,0 +1,281 @@
+From 008df4af47ff2ad18fba68c02f57a82c79da64c1 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 20:14:36 +0800
+Subject: [PATCH 17/19] feat(UI): persist canvases & projection layout to
+ profile JSON (hfr_canvases.json) with restore on start
+
+---
+ frontend/widgets/HFRConsole.cpp | 174 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRConsole.hpp |   4 +
+ 2 files changed, 178 insertions(+)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index a4f5f68..e780328 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -11,8 +11,14 @@
+ #include <QScreen>
+ #include <QThread>
+ #include <QVBoxLayout>
++#include <QFile>
++#include <QJsonArray>
++#include <QJsonDocument>
++#include <QJsonObject>
+ #include <QVariant>
+ 
++#include <obs-frontend-api.h>
++
+ #include <vector>
+ 
+ #include <obs-module.h>
+@@ -262,6 +268,8 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 
+ 	RefreshMonitors();
+ 	RefreshCanvasList();
++
++	LoadState();
+ }
+ 
+ HFRConsoleDock::~HFRConsoleDock()
+@@ -405,6 +413,7 @@ void HFRConsoleDock::CreateCanvas()
+ 	canvases.append(cv);
+ 	RefreshCanvasList();
+ 	canvasList->setCurrentRow(canvasList->count() - 1);
++	SaveState();
+ 	HfrLog("created canvas with chosen name/resolution");
+ 	status->setText(QStringLiteral("已新建画布：%1（点“填充测试色”即可见内容）")
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv))));
+@@ -432,9 +441,169 @@ void HFRConsoleDock::RenameSelectedCanvas()
+ 	}
+ 	obs_canvas_set_name(cv, name.trimmed().toUtf8().constData());
+ 	RefreshCanvasList();
++	SaveState();
+ 	HfrLog("renamed canvas");
+ }
+ 
++/* ---------------- 持久化 ---------------- */
++
++QString HFRConsoleDock::StateFilePath() const
++{
++	char *path = obs_frontend_get_current_profile_path();
++	QString dir = path ? QString::fromUtf8(path) : QString();
++	if (path) {
++		bfree(path);
++	}
++	if (dir.isEmpty()) {
++		return QString();
++	}
++	return dir + QStringLiteral("/hfr_canvases.json");
++}
++
++void HFRConsoleDock::SaveState()
++{
++	if (loadingState) {
++		return;
++	}
++	const QString file = StateFilePath();
++	if (file.isEmpty()) {
++		return;
++	}
++
++	QJsonArray canvasArr;
++	for (obs_canvas_t *cv : canvases) {
++		if (!cv) {
++			continue;
++		}
++		struct obs_video_info ovi = {};
++		obs_canvas_get_video_info(cv, &ovi);
++		QJsonObject o;
++		o[QStringLiteral("name")] = QString::fromUtf8(obs_canvas_get_name(cv));
++		o[QStringLiteral("w")] = (int)ovi.base_width;
++		o[QStringLiteral("h")] = (int)ovi.base_height;
++		o[QStringLiteral("test")] = testSceneAdded.value(cv, false);
++		o[QStringLiteral("safe")] = safeAreaPref.value(cv, false);
++		canvasArr.append(o);
++	}
++
++	QJsonArray projArr;
++	for (const HFRProjection &pr : projections) {
++		if (!pr.window || !pr.canvas) {
++			continue;
++		}
++		const auto screens = QGuiApplication::screens();
++		QString screenName = (pr.screenIndex >= 0 && pr.screenIndex < screens.size())
++					     ? screens.at(pr.screenIndex)->name()
++					     : QString();
++		QJsonObject o;
++		o[QStringLiteral("canvas")] = QString::fromUtf8(obs_canvas_get_name(pr.canvas));
++		o[QStringLiteral("screen")] = pr.screenIndex;
++		o[QStringLiteral("screenName")] = screenName;
++		o[QStringLiteral("safe")] = pr.window->HasSafeArea();
++		projArr.append(o);
++	}
++
++	QJsonObject root;
++	root[QStringLiteral("version")] = 1;
++	root[QStringLiteral("canvases")] = canvasArr;
++	root[QStringLiteral("projections")] = projArr;
++
++	QFile f(file);
++	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++		f.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
++		f.close();
++	}
++}
++
++void HFRConsoleDock::LoadState()
++{
++	const QString file = StateFilePath();
++	if (file.isEmpty() || !QFile::exists(file)) {
++		return;
++	}
++	QFile f(file);
++	if (!f.open(QIODevice::ReadOnly)) {
++		return;
++	}
++	const QJsonDocument doc = QJsonDocument::fromJson(f.readAll());
++	f.close();
++	if (!doc.isObject()) {
++		return;
++	}
++
++	loadingState = true;
++
++	const QJsonArray canvasArr = doc.object().value(QStringLiteral("canvases")).toArray();
++	for (const QJsonValue &v : canvasArr) {
++		const QJsonObject o = v.toObject();
++		const QString name = o.value(QStringLiteral("name")).toString();
++		const uint32_t w = (uint32_t)o.value(QStringLiteral("w")).toInt(1280);
++		const uint32_t h = (uint32_t)o.value(QStringLiteral("h")).toInt(720);
++		if (name.isEmpty()) {
++			continue;
++		}
++		struct obs_video_info ovi = {};
++		obs_get_video_info(&ovi);
++		ovi.base_width = w ? w : 1280;
++		ovi.base_height = h ? h : 720;
++		obs_canvas_t *cv = obs_canvas_create(name.toUtf8().constData(), &ovi, ACTIVATE | SCENE_REF);
++		if (!cv) {
++			continue;
++		}
++		canvases.append(cv);
++		safeAreaPref.insert(cv, o.value(QStringLiteral("safe")).toBool(false));
++		if (o.value(QStringLiteral("test")).toBool(false)) {
++			SetCanvasTestColor(cv);
++		}
++	}
++
++	RefreshCanvasList();
++
++	const QJsonArray projArr = doc.object().value(QStringLiteral("projections")).toArray();
++	const auto screens = QGuiApplication::screens();
++	for (const QJsonValue &v : projArr) {
++		const QJsonObject o = v.toObject();
++		const QString cname = o.value(QStringLiteral("canvas")).toString();
++		int idx = o.value(QStringLiteral("screen")).toInt(-1);
++		const QString savedScreenName = o.value(QStringLiteral("screenName")).toString();
++		const bool safe = o.value(QStringLiteral("safe")).toBool(false);
++
++		obs_canvas_t *cv = nullptr;
++		if (cname == QStringLiteral("Main") || cname.isEmpty()) {
++			cv = obs_get_main_canvas();
++		} else {
++			for (obs_canvas_t *c : canvases) {
++				if (c && cname == QString::fromUtf8(obs_canvas_get_name(c))) {
++					cv = c;
++					break;
++				}
++			}
++		}
++		if (!cv) {
++			continue;
++		}
++		/* 显示器顺序可能变化：优先按名称匹配，其次按索引 */
++		if (!savedScreenName.isEmpty()) {
++			for (int i = 0; i < screens.size(); i++) {
++				if (screens.at(i)->name() == savedScreenName) {
++					idx = i;
++					break;
++				}
++			}
++		}
++		if (idx < 0 || idx >= screens.size()) {
++			continue;
++		}
++		ProjectCanvasToMonitor(cv, idx);
++		if (!projections.isEmpty()) {
++			projections.last().window->SetSafeArea(safe);
++		}
++	}
++
++	loadingState = false;
++	HfrLog("state loaded");
++}
++
+ void HFRConsoleDock::RemoveSelectedCanvas()
+ {
+ 	int row = canvasList->currentRow();
+@@ -462,6 +631,7 @@ void HFRConsoleDock::RemoveSelectedCanvas()
+ 	safeAreaPref.remove(cv);
+ 	TeardownUserCanvas(cv);
+ 	RefreshCanvasList();
++	SaveState();
+ 	HfrLog("removed canvas");
+ 	status->setText(QStringLiteral("已删除画布"));
+ }
+@@ -563,6 +733,7 @@ void HFRConsoleDock::ProjectCanvasToMonitor(obs_canvas_t *cv, int mRow)
+ 	pr.canvas = cv;
+ 	pr.screenIndex = mRow;
+ 	projections.append(pr);
++	SaveState();
+ 	HfrLog("projected canvas to screen");
+ 	status->setText(QStringLiteral("已投影 %1 → 屏%2（投影 %3 个）")
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv)))
+@@ -602,6 +773,7 @@ void HFRConsoleDock::ToggleSafeAreaOnSelected()
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv)))
+ 				.arg(on ? QStringLiteral("开") : QStringLiteral("关"))
+ 				.arg(n));
++	SaveState();
+ 	HfrLog(on ? "safe area ON" : "safe area OFF");
+ }
+ 
+@@ -626,6 +798,7 @@ void HFRConsoleDock::StopProjectionOfSelected()
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv)))
+ 				.arg(before - projections.size())
+ 				.arg(projections.size()));
++	SaveState();
+ }
+ 
+ void HFRConsoleDock::CloseAllProjectors()
+@@ -636,4 +809,5 @@ void HFRConsoleDock::CloseAllProjectors()
+ 		}
+ 	}
+ 	projections.clear();
++	SaveState();
+ }
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 7ad7677..7d12971 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -77,6 +77,9 @@ public:
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
+ 	void ToggleSafeAreaOnSelected(); /* 选中画布的投影：安全区网格开关 */
++	QString StateFilePath() const;   /* profile 目录下的状态文件路径 */
++	void SaveState();                /* 持久化画布/投影布局到 profile 目录 JSON */
++	void LoadState();                /* 启动时恢复 */
+ 	void SetTestColorOnSelected(); /* 给选中画布就地填一块测试色 */
+ 	void SetCanvasTestColor(obs_canvas_t *cv);
+ 
+@@ -101,5 +104,6 @@ private:
+ 	QVector<HFRProjection> projections; /* 受管投影记录 */
+ 	QHash<obs_canvas_t *, bool> testSceneAdded;       /* 是否已加测试色场景 */
+ 	QHash<obs_canvas_t *, bool> safeAreaPref;         /* 每画布安全区开关记忆 */
++	bool loadingState = false;                        /* 载入中：不触发保存 */
+ 	static HFRConsoleDock *s_instance;
+ };
+\ No newline at end of file
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,55 @@
+From 932cab8eff2c56d671f5c23a16a845cf5393ba47 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 07:06:51 +0800
+Subject: [PATCH 11/19] fix(UI): drain canvas destruction via weak-canvas poll
+ in CleanupForShutdown (shutdown race)
+
+---
+ frontend/widgets/HFRConsole.cpp | 20 +++++++++++++++++---
+ 1 file changed, 17 insertions(+), 3 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 0df01f4..928cad1 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -9,6 +9,7 @@
+ #include <QListWidget>
+ #include <QPushButton>
+ #include <QScreen>
++#include <QThread>
+ #include <QVBoxLayout>
+ #include <QVariant>
+ 
+@@ -206,13 +207,26 @@ void HFRConsoleDock::CleanupForShutdown()
+ {
+ 	CloseAllProjectors();
+ 	for (obs_canvas_t *cv : canvases) {
+-		if (cv) {
+-			obs_canvas_remove(cv);
+-			obs_canvas_release(cv);
++		if (!cv || cv == obs_get_main_canvas()) {
++			continue;
++		}
++		/* 异步销毁排队：用 weak 引用轮询等待画布对象真正销毁，
++		 * 避免其场景/源的延迟销毁与 obs_shutdown 的 obs_free_data 竞争 */
++		obs_weak_canvas_t *weak = obs_canvas_get_weak_canvas(cv);
++		obs_canvas_remove(cv);
++		obs_canvas_release(cv);
++		if (weak) {
++			int waited = 0;
++			while (obs_weak_canvas_get_canvas(weak) && waited < 3000) {
++				QThread::msleep(5);
++				waited += 5;
++			}
++			obs_weak_canvas_release(weak);
+ 		}
+ 	}
+ 	canvases.clear();
+ 	testSceneAdded.clear();
++	HfrLog("cleanup done: user canvases destroyed before shutdown");
+ }
+ 
+ void HFRConsoleDock::RefreshMonitors()
+-- 
+2.55.0.windows.5
+

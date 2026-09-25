@@ -1,0 +1,106 @@
+From 492f799415c1778d618bfae2748547eeffb6ed6b Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 20:07:03 +0800
+Subject: [PATCH 16/19] =?UTF-8?q?fix(UI):=20robust=20canvas=20teardown=20?=
+ =?UTF-8?q?=E2=80=94=20clear=20channel,=20remove=20canvas=20scenes,=20obs?=
+ =?UTF-8?q?=5Fwait=5Ffor=5Fdestroy=5Fqueue=20before=20shutdown?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.cpp | 57 ++++++++++++++++++++++-----------
+ 1 file changed, 38 insertions(+), 19 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 867bc6f..a4f5f68 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -13,6 +13,8 @@
+ #include <QVBoxLayout>
+ #include <QVariant>
+ 
++#include <vector>
++
+ #include <obs-module.h>
+ 
+ HFRConsoleDock *HFRConsoleDock::s_instance = nullptr;
+@@ -268,30 +270,47 @@ HFRConsoleDock::~HFRConsoleDock()
+ 	s_instance = nullptr;
+ }
+ 
++/* 枚举回调：收集画布内场景（先收集后移除，避免遍历中修改） */
++static bool CollectSceneCallback(void *param, obs_source_t *sceneSource)
++{
++	auto *scenes = static_cast<std::vector<obs_scene_t *> *>(param);
++	if (obs_scene_t *sc = obs_scene_from_source(sceneSource)) {
++		scenes->push_back(sc);
++	}
++	return true;
++}
++
++/* 运行时删除单个画布：清通道 → 移除其场景 → 释放画布 */
++static void TeardownUserCanvas(obs_canvas_t *cv)
++{
++	if (!cv || cv == obs_get_main_canvas()) {
++		return;
++	}
++	obs_canvas_set_channel(cv, 0, nullptr);
++	std::vector<obs_scene_t *> scenes;
++	obs_canvas_enum_scenes(cv, CollectSceneCallback, &scenes);
++	for (obs_scene_t *sc : scenes) {
++		obs_canvas_scene_remove(sc);
++	}
++	obs_canvas_remove(cv);
++	obs_canvas_release(cv);
++}
++
+ void HFRConsoleDock::CleanupForShutdown()
+ {
+ 	CloseAllProjectors();
+ 	for (obs_canvas_t *cv : canvases) {
+-		if (!cv || cv == obs_get_main_canvas()) {
+-			continue;
+-		}
+-		/* 异步销毁排队：用 weak 引用轮询等待画布对象真正销毁，
+-		 * 避免其场景/源的延迟销毁与 obs_shutdown 的 obs_free_data 竞争 */
+-		obs_weak_canvas_t *weak = obs_canvas_get_weak_canvas(cv);
+-		obs_canvas_remove(cv);
+-		obs_canvas_release(cv);
+-		if (weak) {
+-			int waited = 0;
+-			while (obs_weak_canvas_get_canvas(weak) && waited < 3000) {
+-				QThread::msleep(5);
+-				waited += 5;
+-			}
+-			obs_weak_canvas_release(weak);
+-		}
++		TeardownUserCanvas(cv);
+ 	}
+ 	canvases.clear();
+ 	testSceneAdded.clear();
+-	HfrLog("cleanup done: user canvases destroyed before shutdown");
++	safeAreaPref.clear();
++
++	/* 关键：在 obs_shutdown 之前把延迟销毁队列排空（官方 API），
++	 * 否则画布场景/源的销毁会与 obs_free_data 竞争（曾致 c0000005） */
++	obs_wait_for_destroy_queue();
++	obs_wait_for_destroy_queue();
++	HfrLog("cleanup: scenes removed, canvases released, destroy queue drained");
+ }
+ 
+ void HFRConsoleDock::RefreshMonitors()
+@@ -440,8 +459,8 @@ void HFRConsoleDock::RemoveSelectedCanvas()
+ 	}
+ 	canvases.removeAll(cv);
+ 	testSceneAdded.remove(cv);
+-	obs_canvas_remove(cv);
+-	obs_canvas_release(cv);
++	safeAreaPref.remove(cv);
++	TeardownUserCanvas(cv);
+ 	RefreshCanvasList();
+ 	HfrLog("removed canvas");
+ 	status->setText(QStringLiteral("已删除画布"));
+-- 
+2.55.0.windows.5
+

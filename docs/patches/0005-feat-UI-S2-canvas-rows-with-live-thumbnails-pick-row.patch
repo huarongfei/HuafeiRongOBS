@@ -1,0 +1,347 @@
+From 55bab635628946208aff57bbf2b971abd0371f83 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:44:48 +0800
+Subject: [PATCH 05/19] feat(UI): S2 canvas rows with live thumbnails, pick-row
+ scope, fill-test-color (guarded off main canvas)
+
+---
+ frontend/widgets/HFRConsole.cpp | 156 ++++++++++++++++++++++++++------
+ frontend/widgets/HFRConsole.hpp |  34 +++++--
+ 2 files changed, 155 insertions(+), 35 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 60ac2e7..11caf39 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -19,6 +19,58 @@ static void HfrLog(const char *msg)
+ 	blog(LOG_INFO, "[HFR] %s", msg);
+ }
+ 
++/* ---------------------------- HFRCanvasRow ---------------------------- */
++
++HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, QWidget *parent) : QWidget(parent), canvas(cv)
++{
++	QHBoxLayout *layout = new QHBoxLayout(this);
++	layout->setContentsMargins(2, 2, 2, 2);
++	layout->setSpacing(6);
++
++	thumb = new OBSQTDisplay(this);
++	thumb->setFixedSize(160, 90);
++	thumb->setMinimumSize(160, 90);
++	layout->addWidget(thumb);
++
++	QVBoxLayout *txt = new QVBoxLayout();
++	QLabel *name = new QLabel(this);
++	name->setText(QString::fromUtf8(obs_canvas_get_name(cv)));
++	name->setStyleSheet(QStringLiteral("font-weight:bold;"));
++	txt->addWidget(name);
++
++	struct obs_video_info ovi;
++	QString sizeText = QStringLiteral("?");
++	if (obs_canvas_get_video_info(cv, &ovi)) {
++		sizeText = QStringLiteral("%1x%2").arg(ovi.base_width).arg(ovi.base_height);
++	}
++	QLabel *size = new QLabel(sizeText, this);
++	size->setStyleSheet(QStringLiteral("color:#888;"));
++	txt->addWidget(size);
++	layout->addLayout(txt, 1);
++
++	auto addDraw = [this]() {
++		obs_display_add_draw_callback(thumb->GetDisplay(), &HFRCanvasRow::DrawThumb, this);
++	};
++	connect(thumb, &OBSQTDisplay::DisplayCreated, this, addDraw);
++	ready = true;
++}
++
++HFRCanvasRow::~HFRCanvasRow()
++{
++	if (thumb && thumb->GetDisplay()) {
++		obs_display_remove_draw_callback(thumb->GetDisplay(), &HFRCanvasRow::DrawThumb, this);
++	}
++}
++
++void HFRCanvasRow::DrawThumb(void *data, uint32_t, uint32_t)
++{
++	HFRCanvasRow *row = static_cast<HFRCanvasRow *>(data);
++	if (!row || !row->ready || !row->canvas || !row->thumb) {
++		return;
++	}
++	obs_render_canvas_texture(row->canvas);
++}
++
+ /* ------------------------- HFRCanvasProjector ------------------------- */
+ 
+ HFRCanvasProjector::HFRCanvasProjector(obs_canvas_t *canvas_, QScreen *screen, QWidget *parent)
+@@ -91,30 +143,35 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 
+ 	layout->addWidget(new QLabel(QStringLiteral("显示器（编号）"), panel));
+ 	monitorList = new QListWidget(panel);
++	monitorList->setMaximumHeight(110);
+ 	layout->addWidget(monitorList);
+ 
+-	layout->addWidget(new QLabel(QStringLiteral("画布（点击选中=操作作用域）"), panel));
++	layout->addWidget(new QLabel(QStringLiteral("画布（点选行 = 当前操作画布）"), panel));
+ 	canvasList = new QListWidget(panel);
++	canvasList->setUniformItemSizes(false);
+ 	layout->addWidget(canvasList);
+ 
+ 	QHBoxLayout *btnRow = new QHBoxLayout();
+-	btnRefresh = new QPushButton(QStringLiteral("刷新屏/画布"), panel);
++	btnRefresh = new QPushButton(QStringLiteral("刷新"), panel);
+ 	btnNew = new QPushButton(QStringLiteral("+ 新建画布"), panel);
+-	btnRemove = new QPushButton(QStringLiteral("删除画布"), panel);
++	btnRemove = new QPushButton(QStringLiteral("删除"), panel);
+ 	btnRow->addWidget(btnRefresh);
+ 	btnRow->addWidget(btnNew);
+ 	btnRow->addWidget(btnRemove);
+ 	layout->addLayout(btnRow);
+ 
+-	QHBoxLayout *projRow = new QHBoxLayout();
+-	btnProject = new QPushButton(QStringLiteral("▶ 投影到选中屏"), panel);
+-	btnStopAll = new QPushButton(QStringLiteral("■ 关闭所有投影"), panel);
+-	projRow->addWidget(btnProject);
+-	projRow->addWidget(btnStopAll);
+-	layout->addLayout(projRow);
++	QHBoxLayout *actRow = new QHBoxLayout();
++	btnTest = new QPushButton(QStringLiteral("填充测试色"), panel);
++	btnProject = new QPushButton(QStringLiteral("▶投影选中屏"), panel);
++	btnStopAll = new QPushButton(QStringLiteral("■全部关闭"), panel);
++	actRow->addWidget(btnTest);
++	actRow->addWidget(btnProject);
++	actRow->addWidget(btnStopAll);
++	layout->addLayout(actRow);
+ 
+ 	status = new QLabel(QStringLiteral("就绪"), panel);
+ 	status->setWordWrap(true);
++	status->setMaximumHeight(60);
+ 	layout->addWidget(status);
+ 
+ 	setWidget(panel);
+@@ -125,6 +182,7 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	});
+ 	connect(btnNew, &QPushButton::clicked, this, [this]() { CreateCanvas(); });
+ 	connect(btnRemove, &QPushButton::clicked, this, [this]() { RemoveSelectedCanvas(); });
++	connect(btnTest, &QPushButton::clicked, this, [this]() { SetTestColorOnSelected(); });
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+ 
+@@ -142,6 +200,7 @@ HFRConsoleDock::~HFRConsoleDock()
+ 		}
+ 	}
+ 	canvases.clear();
++	testSceneAdded.clear();
+ 	s_instance = nullptr;
+ }
+ 
+@@ -159,13 +218,17 @@ void HFRConsoleDock::RefreshMonitors()
+ 					.arg(s == QGuiApplication::primaryScreen() ? QStringLiteral("  [主]") : QString());
+ 		monitorList->addItem(label);
+ 	}
+-	status->setText(QStringLiteral("检测到 %1 块显示器；请先在系统里接好外接屏后点“刷新”").arg(screens.size()));
++	status->setText(QStringLiteral("显示器 %1 块；接好外接屏后点“刷新”重新编号").arg(screens.size()));
+ }
+ 
+-void HFRConsoleDock::AddCanvasRow(obs_canvas_t *cv, const QString &label)
++void HFRConsoleDock::AddCanvasRowItem(obs_canvas_t *cv, const QString &label)
+ {
+-	QListWidgetItem *item = new QListWidgetItem(label, canvasList);
++	Q_UNUSED(label);
++	QListWidgetItem *item = new QListWidgetItem(canvasList);
+ 	item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(cv)));
++	HFRCanvasRow *row = new HFRCanvasRow(cv, canvasList);
++	item->setSizeHint(row->sizeHint());
++	canvasList->setItemWidget(item, row);
+ }
+ 
+ void HFRConsoleDock::RefreshCanvasList()
+@@ -173,21 +236,13 @@ void HFRConsoleDock::RefreshCanvasList()
+ 	canvasList->clear();
+ 	obs_canvas_t *mainCanvas = obs_get_main_canvas();
+ 	if (mainCanvas) {
+-		struct obs_video_info ovi;
+-		QString size = QStringLiteral("?");
+-		if (obs_canvas_get_video_info(mainCanvas, &ovi)) {
+-			size = QStringLiteral("%1x%2").arg(ovi.base_width).arg(ovi.base_height);
+-		}
+-		AddCanvasRow(mainCanvas, QStringLiteral("★ 主画布  (%1)").arg(size));
++		AddCanvasRowItem(mainCanvas, QString());
+ 		obs_canvas_release(mainCanvas);
+ 	}
+ 	for (obs_canvas_t *cv : canvases) {
+-		struct obs_video_info ovi;
+-		QString size = QStringLiteral("?");
+-		if (cv && obs_canvas_get_video_info(cv, &ovi)) {
+-			size = QStringLiteral("%1x%2").arg(ovi.base_width).arg(ovi.base_height);
++		if (cv) {
++			AddCanvasRowItem(cv, QString());
+ 		}
+-		AddCanvasRow(cv, QStringLiteral("%1  (%2)").arg(QString::fromUtf8(obs_canvas_get_name(cv))).arg(size));
+ 	}
+ 	if (canvasList->count() > 0) {
+ 		canvasList->setCurrentRow(0);
+@@ -216,11 +271,12 @@ void HFRConsoleDock::CreateCanvas()
+ 		status->setText(QStringLiteral("新建画布失败"));
+ 		return;
+ 	}
+-	canvases.append(cv); /* 持有 create 返回的引用 */
++	canvases.append(cv);
+ 	RefreshCanvasList();
+ 	canvasList->setCurrentRow(canvasList->count() - 1);
+ 	HfrLog("created canvas");
+-	status->setText(QStringLiteral("已新建画布：%1").arg(QString::fromUtf8(obs_canvas_get_name(cv))));
++	status->setText(QStringLiteral("已新建画布：%1（点“填充测试色”即可见内容）")
++				.arg(QString::fromUtf8(obs_canvas_get_name(cv))));
+ }
+ 
+ void HFRConsoleDock::RemoveSelectedCanvas()
+@@ -237,8 +293,9 @@ void HFRConsoleDock::RemoveSelectedCanvas()
+ 	if (!canvases.contains(cv)) {
+ 		return;
+ 	}
+-	CloseAllProjectors(); /* 简化：先关全部投影再删 */
++	CloseAllProjectors();
+ 	canvases.removeAll(cv);
++	testSceneAdded.remove(cv);
+ 	obs_canvas_remove(cv);
+ 	obs_canvas_release(cv);
+ 	RefreshCanvasList();
+@@ -246,13 +303,58 @@ void HFRConsoleDock::RemoveSelectedCanvas()
+ 	status->setText(QStringLiteral("已删除画布"));
+ }
+ 
++void HFRConsoleDock::SetCanvasTestColor(obs_canvas_t *cv)
++{
++	if (!cv || cv == obs_get_main_canvas()) {
++		status->setText(QStringLiteral("主画布由主界面管理，测试色仅用于用户画布"));
++		return;
++	}
++	if (testSceneAdded.value(cv, false)) {
++		return;
++	}
++
++	obs_scene_t *sc = obs_canvas_scene_create(cv, "测试色块");
++	if (!sc) {
++		return;
++	}
++	obs_data_t *s = obs_data_create();
++	obs_data_set_int(s, "color", 0xFF00C8FF);
++	obs_data_set_int(s, "width", 1920);
++	obs_data_set_int(s, "height", 1080);
++	obs_source_t *cs = obs_source_create("color_source_v3", "测试色", s, nullptr);
++	obs_data_release(s);
++	if (cs) {
++		obs_sceneitem_t *item = obs_scene_add(sc, cs);
++		if (item) {
++			obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
++			struct vec2 sz = {(float)1920, (float)1080};
++			obs_sceneitem_set_bounds(item, &sz);
++		}
++		obs_source_release(cs);
++	}
++	obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
++	testSceneAdded.insert(cv, true);
++	HfrLog("test color scene added to canvas");
++}
++
++void HFRConsoleDock::SetTestColorOnSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	SetCanvasTestColor(cv);
++	status->setText(QStringLiteral("已填充测试色：%1").arg(QString::fromUtf8(obs_canvas_get_name(cv))));
++}
++
+ void HFRConsoleDock::ProjectSelected()
+ {
+ 	int cRow = canvasList->currentRow();
+ 	int mRow = monitorList->currentRow();
+ 	obs_canvas_t *cv = CanvasFromRow(cRow);
+ 	if (!cv) {
+-		status->setText(QStringLiteral("请先选中画布"));
++		status->setText(QStringLiteral("请先点选画布"));
+ 		return;
+ 	}
+ 	const auto screens = QGuiApplication::screens();
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index b732be3..cecc034 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -4,24 +4,38 @@
+ 
+ #include <obs.hpp>
+ 
++#include <QHash>
+ #include <QDockWidget>
+ #include <QPointer>
+ #include <QVector>
+ 
+ class QListWidget;
++class QListWidgetItem;
+ class QPushButton;
+ class QLabel;
+ class QScreen;
+ 
+ /* ============================================================
+- * HuafeiRongOBS 嵌入式多画布 UI（M4 方向，S1 骨架）
+- * 目标交互（与产品方确认）：
+- *   - 右侧输出矩阵为主：检测外接屏并显示编号，用户选编号即可投影画布到对应屏；
+- *   - 画布/投影全部受管（无散窗）：退出统一关闭，避免与 obs_shutdown 竞争。
+- * 本 S1：显示器编号列表 + 画布列表(含主画布) + 新建/删除 + 按编号全屏投影。
++ * HuafeiRongOBS 嵌入式多画布 UI（S2）
++ *  - 画布行 = 实时缩略预览 + 名称/分辨率（点选行 = 选中该画布为操作对象）
++ *  - 显示器自动编号；"投影到选中屏"全屏受管
++ *  - "填充测试色块"就地给画布一个可见内容（新画布默认为空→黑屏的验证手段）
+  * ============================================================ */
+ 
+-/* 画布投影窗：指定画布 → 指定编号显示器（全屏、受管） */
++/* 画布行控件：缩略预览 + 文字 */
++class HFRCanvasRow : public QWidget {
++public:
++	HFRCanvasRow(obs_canvas_t *cv, QWidget *parent = nullptr);
++	~HFRCanvasRow() override;
++
++private:
++	static void DrawThumb(void *data, uint32_t cx, uint32_t cy);
++	obs_canvas_t *canvas = nullptr;
++	OBSQTDisplay *thumb = nullptr;
++	bool ready = false;
++};
++
++/* 画布投影窗：画布 → 指定编号显示器（全屏、受管） */
+ class HFRCanvasProjector : public OBSQTDisplay {
+ public:
+ 	HFRCanvasProjector(obs_canvas_t *canvas, QScreen *screen, QWidget *parent = nullptr);
+@@ -47,21 +61,25 @@ public:
+ 	void RemoveSelectedCanvas();
+ 	void ProjectSelected();
+ 	void CloseAllProjectors();
++	void SetTestColorOnSelected(); /* 给选中画布就地填一块测试色 */
++	void SetCanvasTestColor(obs_canvas_t *cv);
+ 
+ private:
+ 	obs_canvas_t *CanvasFromRow(int row) const;
+-	void AddCanvasRow(obs_canvas_t *cv, const QString &label);
++	void AddCanvasRowItem(obs_canvas_t *cv, const QString &label);
+ 
+ 	QListWidget *monitorList = nullptr;
+ 	QListWidget *canvasList = nullptr;
+ 	QPushButton *btnRefresh = nullptr;
+ 	QPushButton *btnNew = nullptr;
+ 	QPushButton *btnRemove = nullptr;
++	QPushButton *btnTest = nullptr;
+ 	QPushButton *btnProject = nullptr;
+ 	QPushButton *btnStopAll = nullptr;
+ 	QLabel *status = nullptr;
+ 
+-	QVector<obs_canvas_t *> canvases;                 /* 本坞创建/持有的用户画布（强引用）；主画布不入列 */
++	QVector<obs_canvas_t *> canvases;                 /* 本坞创建/持有的用户画布（强引用） */
+ 	QVector<QPointer<HFRCanvasProjector>> projectors; /* 受管投影窗 */
++	QHash<obs_canvas_t *, bool> testSceneAdded;       /* 是否已加测试色场景 */
+ 	static HFRConsoleDock *s_instance;
+ };
+-- 
+2.55.0.windows.5
+

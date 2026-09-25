@@ -1,0 +1,263 @@
+From a1e67713edc07ecf06b1c9a27d24ea2257f6ea98 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 20:21:14 +0800
+Subject: [PATCH 18/19] =?UTF-8?q?feat(UI):=20per-canvas=20scene=20scope=20?=
+ =?UTF-8?q?=E2=80=94=20list/create/switch/delete=20scenes=20+=20add=20colo?=
+ =?UTF-8?q?r=20into=20scene?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.cpp | 177 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRConsole.hpp |  10 ++
+ 2 files changed, 187 insertions(+)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index e780328..6c4361e 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -208,6 +208,22 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	canvasList->setUniformItemSizes(false);
+ 	layout->addWidget(canvasList);
+ 
++	layout->addWidget(new QLabel(QStringLiteral("场景（当前画布）"), panel));
++	sceneList = new QListWidget(panel);
++	sceneList->setMaximumHeight(120);
++	layout->addWidget(sceneList);
++
++	QHBoxLayout *scRow = new QHBoxLayout();
++	btnSceneNew = new QPushButton(QStringLiteral("+场景"), panel);
++	btnSceneUse = new QPushButton(QStringLiteral("切到此场景"), panel);
++	btnSceneDel = new QPushButton(QStringLiteral("删场景"), panel);
++	btnSceneColor = new QPushButton(QStringLiteral("给场景加色块"), panel);
++	scRow->addWidget(btnSceneNew);
++	scRow->addWidget(btnSceneUse);
++	scRow->addWidget(btnSceneDel);
++	scRow->addWidget(btnSceneColor);
++	layout->addLayout(scRow);
++
+ 	QHBoxLayout *btnRow = new QHBoxLayout();
+ 	btnRefresh = new QPushButton(QStringLiteral("刷新"), panel);
+ 	btnNew = new QPushButton(QStringLiteral("+ 新建画布"), panel);
+@@ -246,6 +262,11 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnRename, &QPushButton::clicked, this, [this]() { RenameSelectedCanvas(); });
+ 	connect(btnTest, &QPushButton::clicked, this, [this]() { SetTestColorOnSelected(); });
+ 	connect(btnSafeArea, &QPushButton::clicked, this, [this]() { ToggleSafeAreaOnSelected(); });
++	connect(btnSceneNew, &QPushButton::clicked, this, [this]() { CreateSceneForSelected(); });
++	connect(btnSceneUse, &QPushButton::clicked, this, [this]() { SwitchToSelectedScene(); });
++	connect(btnSceneDel, &QPushButton::clicked, this, [this]() { DeleteSelectedScene(); });
++	connect(btnSceneColor, &QPushButton::clicked, this, [this]() { FillColorIntoSelectedScene(); });
++	connect(canvasList, &QListWidget::currentRowChanged, this, [this](int) { UpdateSceneListForSelection(); });
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+@@ -268,8 +289,10 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 
+ 	RefreshMonitors();
+ 	RefreshCanvasList();
++	UpdateSceneListForSelection();
+ 
+ 	LoadState();
++	UpdateSceneListForSelection();
+ }
+ 
+ HFRConsoleDock::~HFRConsoleDock()
+@@ -445,6 +468,160 @@ void HFRConsoleDock::RenameSelectedCanvas()
+ 	HfrLog("renamed canvas");
+ }
+ 
++/* ---------------- 场景作用域（当前画布） ---------------- */
++
++static bool CollectSceneSourcesCallback(void *param, obs_source_t *sceneSource)
++{
++	auto *vec = static_cast<std::vector<obs_source_t *> *>(param);
++	vec->push_back(sceneSource);
++	return true;
++}
++
++void HFRConsoleDock::UpdateSceneListForSelection()
++{
++	if (!sceneList) {
++		return;
++	}
++	sceneList->clear();
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		return;
++	}
++	std::vector<obs_source_t *> scenes;
++	obs_canvas_enum_scenes(cv, CollectSceneSourcesCallback, &scenes);
++
++	obs_source_t *cur = obs_canvas_get_channel(cv, 0);
++	QString curName = cur ? QString::fromUtf8(obs_source_get_name(cur)) : QString();
++
++	for (obs_source_t *s : scenes) {
++		const QString name = QString::fromUtf8(obs_source_get_name(s));
++		QListWidgetItem *item = new QListWidgetItem(
++			(name == curName ? QStringLiteral("▶ ") : QStringLiteral("   ")) + name, sceneList);
++		item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(s)));
++		if (name == curName) {
++			sceneList->setCurrentItem(item);
++		}
++	}
++}
++
++void HFRConsoleDock::CreateSceneForSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	bool ok = false;
++	QString name = QInputDialog::getText(this, QStringLiteral("新建场景"), QStringLiteral("场景名称"),
++					     QLineEdit::Normal,
++					     QString::fromUtf8(obs_canvas_get_name(cv)) + QStringLiteral(" · 场景"), &ok);
++	if (!ok || name.trimmed().isEmpty()) {
++		return;
++	}
++	obs_scene_t *sc = obs_canvas_scene_create(cv, name.trimmed().toUtf8().constData());
++	if (!sc) {
++		status->setText(QStringLiteral("创建场景失败（名称冲突？）"));
++		return;
++	}
++	UpdateSceneListForSelection();
++	SaveState();
++	status->setText(QStringLiteral("已新建场景：%1").arg(name.trimmed()));
++}
++
++void HFRConsoleDock::SwitchToSelectedScene()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	QListWidgetItem *item = sceneList->currentItem();
++	if (!item) {
++		status->setText(QStringLiteral("请先选中场景"));
++		return;
++	}
++	obs_source_t *scSrc = reinterpret_cast<obs_source_t *>(
++		static_cast<quintptr>(item->data(Qt::UserRole).toULongLong()));
++	if (!scSrc) {
++		return;
++	}
++	obs_canvas_set_channel(cv, 0, scSrc);
++	UpdateSceneListForSelection();
++	SaveState();
++	status->setText(QStringLiteral("已切换场景：%1").arg(QString::fromUtf8(obs_source_get_name(scSrc))));
++	HfrLog("scene switched on canvas");
++}
++
++void HFRConsoleDock::DeleteSelectedScene()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	QListWidgetItem *item = sceneList->currentItem();
++	if (!cv || !item) {
++		status->setText(QStringLiteral("请先选中画布与场景"));
++		return;
++	}
++	obs_source_t *scSrc = reinterpret_cast<obs_source_t *>(
++		static_cast<quintptr>(item->data(Qt::UserRole).toULongLong()));
++	obs_scene_t *sc = scSrc ? obs_scene_from_source(scSrc) : nullptr;
++	if (!sc) {
++		return;
++	}
++	/* 若删除的是当前场景，先断开通道，避免引用悬空 */
++	if (obs_canvas_get_channel(cv, 0) == scSrc) {
++		obs_canvas_set_channel(cv, 0, nullptr);
++	}
++	obs_canvas_scene_remove(sc);
++	UpdateSceneListForSelection();
++	SaveState();
++	status->setText(QStringLiteral("已删除场景"));
++}
++
++void HFRConsoleDock::FillColorIntoSelectedScene()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	QListWidgetItem *item = sceneList->currentItem();
++	if (!cv || !item) {
++		status->setText(QStringLiteral("请先选中画布与场景"));
++		return;
++	}
++	obs_source_t *scSrc = reinterpret_cast<obs_source_t *>(
++		static_cast<quintptr>(item->data(Qt::UserRole).toULongLong()));
++	obs_scene_t *sc = scSrc ? obs_scene_from_source(scSrc) : nullptr;
++	if (!sc) {
++		return;
++	}
++
++	struct obs_video_info ovi = {};
++	uint32_t w = 1280, h = 720;
++	if (obs_canvas_get_video_info(cv, &ovi) && ovi.base_width && ovi.base_height) {
++		w = ovi.base_width;
++		h = ovi.base_height;
++	}
++
++	obs_data_t *s = obs_data_create();
++	obs_data_set_int(s, "color", 0xFF00C8FF);
++	obs_data_set_int(s, "width", (long long)w);
++	obs_data_set_int(s, "height", (long long)h);
++	const QByteArray scn = obs_source_get_name(scSrc);
++	obs_source_t *cs = obs_source_create("color_source_v3", (scn + " · 色块").constData(), s, nullptr);
++	obs_data_release(s);
++	if (!cs) {
++		status->setText(QStringLiteral("创建色块失败"));
++		return;
++	}
++	obs_sceneitem_t *it = obs_scene_add(sc, cs);
++	if (it) {
++		obs_sceneitem_set_bounds_type(it, OBS_BOUNDS_STRETCH);
++		struct vec2 sz = {(float)w, (float)h};
++		obs_sceneitem_set_bounds(it, &sz);
++		struct vec2 pos = {0.0f, 0.0f};
++		obs_sceneitem_set_pos(it, &pos);
++	}
++	obs_source_release(cs);
++	status->setText(QStringLiteral("已给场景加色块（%1x%2）").arg(w).arg(h));
++	HfrLog("color added into canvas scene");
++}
++
+ /* ---------------- 持久化 ---------------- */
+ 
+ QString HFRConsoleDock::StateFilePath() const
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 7d12971..6fc5c6e 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -77,6 +77,11 @@ public:
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
+ 	void ToggleSafeAreaOnSelected(); /* 选中画布的投影：安全区网格开关 */
++	void UpdateSceneListForSelection(); /* 场景作用域：列出当前画布的场景 */
++	void CreateSceneForSelected();      /* 为当前画布新建场景 */
++	void SwitchToSelectedScene();       /* 把当前画布切到选中场景 */
++	void DeleteSelectedScene();         /* 删除当前画布的选中场景 */
++	void FillColorIntoSelectedScene();  /* 给选中场景加一块铺满的色块（演示内容） */
+ 	QString StateFilePath() const;   /* profile 目录下的状态文件路径 */
+ 	void SaveState();                /* 持久化画布/投影布局到 profile 目录 JSON */
+ 	void LoadState();                /* 启动时恢复 */
+@@ -89,12 +94,17 @@ private:
+ 
+ 	QListWidget *monitorList = nullptr;
+ 	QListWidget *canvasList = nullptr;
++	QListWidget *sceneList = nullptr;
+ 	QPushButton *btnRefresh = nullptr;
+ 	QPushButton *btnNew = nullptr;
+ 	QPushButton *btnRemove = nullptr;
+ 	QPushButton *btnRename = nullptr;
+ 	QPushButton *btnTest = nullptr;
+ 	QPushButton *btnProject = nullptr;
++	QPushButton *btnSceneNew = nullptr;
++	QPushButton *btnSceneUse = nullptr;
++	QPushButton *btnSceneDel = nullptr;
++	QPushButton *btnSceneColor = nullptr;
+ 	QPushButton *btnSafeArea = nullptr;
+ 	QPushButton *btnStopOne = nullptr;
+ 	QPushButton *btnStopAll = nullptr;
+-- 
+2.55.0.windows.5
+

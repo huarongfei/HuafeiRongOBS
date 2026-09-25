@@ -1,0 +1,98 @@
+From c76e0f10e8e60403157d08f7c319b8e9fbcb0fb8 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:51:48 +0800
+Subject: [PATCH 07/19] feat(UI): canvas rename dialog (main excluded)
+
+---
+ frontend/widgets/HFRConsole.cpp | 30 ++++++++++++++++++++++++++++++
+ frontend/widgets/HFRConsole.hpp |  2 ++
+ 2 files changed, 32 insertions(+)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index c3b6ca6..f963fa7 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -3,7 +3,9 @@
+ #include <QAction>
+ #include <QGuiApplication>
+ #include <QHBoxLayout>
++#include <QInputDialog>
+ #include <QLabel>
++#include <QLineEdit>
+ #include <QListWidget>
+ #include <QPushButton>
+ #include <QScreen>
+@@ -155,8 +157,10 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	btnRefresh = new QPushButton(QStringLiteral("刷新"), panel);
+ 	btnNew = new QPushButton(QStringLiteral("+ 新建画布"), panel);
+ 	btnRemove = new QPushButton(QStringLiteral("删除"), panel);
++	btnRename = new QPushButton(QStringLiteral("重命名"), panel);
+ 	btnRow->addWidget(btnRefresh);
+ 	btnRow->addWidget(btnNew);
++	btnRow->addWidget(btnRename);
+ 	btnRow->addWidget(btnRemove);
+ 	layout->addLayout(btnRow);
+ 
+@@ -182,6 +186,7 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	});
+ 	connect(btnNew, &QPushButton::clicked, this, [this]() { CreateCanvas(); });
+ 	connect(btnRemove, &QPushButton::clicked, this, [this]() { RemoveSelectedCanvas(); });
++	connect(btnRename, &QPushButton::clicked, this, [this]() { RenameSelectedCanvas(); });
+ 	connect(btnTest, &QPushButton::clicked, this, [this]() { SetTestColorOnSelected(); });
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+@@ -284,6 +289,31 @@ void HFRConsoleDock::CreateCanvas()
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv))));
+ }
+ 
++void HFRConsoleDock::RenameSelectedCanvas()
++{
++	int row = canvasList->currentRow();
++	obs_canvas_t *cv = CanvasFromRow(row);
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	if (cv == obs_get_main_canvas()) {
++		status->setText(QStringLiteral("主画布不可重命名"));
++		return;
++	}
++	bool ok = false;
++	QString name = QInputDialog::getText(this, QStringLiteral("重命名画布"),
++					      QStringLiteral("画布名称"),
++					      QLineEdit::Normal,
++					      QString::fromUtf8(obs_canvas_get_name(cv)), &ok);
++	if (!ok || name.trimmed().isEmpty()) {
++		return;
++	}
++	obs_canvas_set_name(cv, name.trimmed().toUtf8().constData());
++	RefreshCanvasList();
++	HfrLog("renamed canvas");
++}
++
+ void HFRConsoleDock::RemoveSelectedCanvas()
+ {
+ 	int row = canvasList->currentRow();
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index bc49a3d..19f5526 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -59,6 +59,7 @@ public:
+ 	void RefreshCanvasList();
+ 	void CreateCanvas();
+ 	void RemoveSelectedCanvas();
++	void RenameSelectedCanvas();
+ 	void ProjectSelected();
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
+@@ -74,6 +75,7 @@ private:
+ 	QPushButton *btnRefresh = nullptr;
+ 	QPushButton *btnNew = nullptr;
+ 	QPushButton *btnRemove = nullptr;
++	QPushButton *btnRename = nullptr;
+ 	QPushButton *btnTest = nullptr;
+ 	QPushButton *btnProject = nullptr;
+ 	QPushButton *btnStopAll = nullptr;
+-- 
+2.55.0.windows.5
+

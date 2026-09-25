@@ -1,0 +1,26 @@
+From 4a29b2068a1a553f6b80fd06ea6cd81d4a674392 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:31:05 +0800
+Subject: [PATCH 03/19] fix(M1): connect aboutToQuit with context this;
+ CloseAll demo windows before obs_shutdown
+
+---
+ frontend/widgets/OBSBasic.cpp | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index cde7fba..f0978ee 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -1049,7 +1049,7 @@ void OBSBasic::OBSInit()
+ 			QTimer::singleShot(4000, []() { HFRCanvasWindow::OpenE1(); });
+ 		}
+ 		/* 退出前先关演示窗口，避免画布释放与 obs_shutdown 竞争（曾致 c0000005） */
+-		connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, []() {
++		connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, []() {
+ 			HFRCanvasWindow::CloseAll();
+ 		});
+ 	}
+-- 
+2.55.0.windows.5
+

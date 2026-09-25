@@ -1,0 +1,94 @@
+From da86950d7048c38baaefabd09a0a718ca4820528 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 07:12:27 +0800
+Subject: [PATCH 12/19] feat(UI): double-click canvas row projects to primary
+ screen
+
+---
+ frontend/widgets/HFRConsole.cpp | 41 +++++++++++++++++++++++++--------
+ frontend/widgets/HFRConsole.hpp |  1 +
+ 2 files changed, 32 insertions(+), 10 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 928cad1..855e890 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -192,6 +192,22 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
++	connect(canvasList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
++		int row = canvasList->row(item);
++		obs_canvas_t *cv = CanvasFromRow(row);
++		if (!cv) {
++			return;
++		}
++		const auto screens = QGuiApplication::screens();
++		int primary = 0;
++		for (int i = 0; i < screens.size(); i++) {
++			if (screens.at(i) == QGuiApplication::primaryScreen()) {
++				primary = i;
++				break;
++			}
++		}
++		ProjectCanvasToMonitor(cv, primary);
++	});
+ 
+ 	RefreshMonitors();
+ 	RefreshCanvasList();
+@@ -427,18 +443,11 @@ void HFRConsoleDock::SetTestColorOnSelected()
+ 	status->setText(QStringLiteral("已填充测试色：%1").arg(QString::fromUtf8(obs_canvas_get_name(cv))));
+ }
+ 
+-void HFRConsoleDock::ProjectSelected()
++void HFRConsoleDock::ProjectCanvasToMonitor(obs_canvas_t *cv, int mRow)
+ {
+-	int cRow = canvasList->currentRow();
+-	int mRow = monitorList->currentRow();
+-	obs_canvas_t *cv = CanvasFromRow(cRow);
+-	if (!cv) {
+-		status->setText(QStringLiteral("请先点选画布"));
+-		return;
+-	}
+ 	const auto screens = QGuiApplication::screens();
+-	if (mRow < 0 || mRow >= screens.size()) {
+-		status->setText(QStringLiteral("请先选中显示器编号"));
++	if (!cv || mRow < 0 || mRow >= screens.size()) {
++		status->setText(QStringLiteral("画布或显示器编号无效"));
+ 		return;
+ 	}
+ 	/* 同画布+同屏已在投 → 前置即可 */
+@@ -464,6 +473,18 @@ void HFRConsoleDock::ProjectSelected()
+ 				.arg(projections.size()));
+ }
+ 
++void HFRConsoleDock::ProjectSelected()
++{
++	int cRow = canvasList->currentRow();
++	int mRow = monitorList->currentRow();
++	obs_canvas_t *cv = CanvasFromRow(cRow);
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	ProjectCanvasToMonitor(cv, mRow);
++}
++
+ void HFRConsoleDock::StopProjectionOfSelected()
+ {
+ 	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 856719b..35e6111 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -67,6 +67,7 @@ public:
+ 	void CreateCanvas();
+ 	void RemoveSelectedCanvas();
+ 	void RenameSelectedCanvas();
++	void ProjectCanvasToMonitor(obs_canvas_t *cv, int mRow);
+ 	void ProjectSelected();
+ 	void StopProjectionOfSelected();
+ 	void CloseAllProjectors();
+-- 
+2.55.0.windows.5
+

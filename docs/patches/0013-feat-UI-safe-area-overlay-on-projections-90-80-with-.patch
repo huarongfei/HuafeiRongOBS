@@ -1,0 +1,180 @@
+From 26ed6a6a958593b8b364a2715b799da9c72b5c21 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 19:56:20 +0800
+Subject: [PATCH 13/19] feat(UI): safe-area overlay on projections (90%/80%)
+ with per-canvas toggle memory
+
+---
+ frontend/widgets/HFRConsole.cpp | 75 ++++++++++++++++++++++++++++++++-
+ frontend/widgets/HFRConsole.hpp |  7 +++
+ 2 files changed, 81 insertions(+), 1 deletion(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 855e890..63cbbde 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -123,13 +123,59 @@ HFRCanvasProjector::~HFRCanvasProjector()
+ 	}
+ }
+ 
+-void HFRCanvasProjector::Draw(void *data, uint32_t, uint32_t)
++/* 安全区矩形叠加（ratio=内缩比例：0.05→90% 标题区，0.10→80% 动作区） */
++static void DrawSafeAreaRect(uint32_t cx, uint32_t cy, float ratio, uint32_t color)
++{
++	if (cx == 0 || cy == 0) {
++		return;
++	}
++	gs_effect_t *solid = obs_get_base_effect(OBS_EFFECT_SOLID);
++	gs_eparam_t *colorParam = gs_effect_get_param_by_name(solid, "color");
++	gs_effect_set_color(colorParam, color);
++
++	const float m = ratio;
++	const float x0 = m * (float)cx;
++	const float y0 = m * (float)cy;
++	const float w = (1.0f - 2.0f * m) * (float)cx;
++	const float h = (1.0f - 2.0f * m) * (float)cy;
++	const float t = 2.0f;
++	if (w <= 0.0f || h <= 0.0f) {
++		return;
++	}
++
++	auto bar = [&](float bx, float by, float bw, float bh) {
++		gs_matrix_push();
++		gs_matrix_translate3f(bx, by, 0.0f);
++		while (gs_effect_loop(solid, "Solid")) {
++			gs_draw_sprite(nullptr, 0, (uint32_t)bw, (uint32_t)bh);
++		}
++		gs_matrix_pop();
++	};
++
++	bar(x0, y0, w, t);
++	bar(x0, y0 + h - t, w, t);
++	bar(x0, y0, t, h);
++	bar(x0 + w - t, y0, t, h);
++}
++
++void HFRCanvasProjector::Draw(void *data, uint32_t cx, uint32_t cy)
+ {
+ 	HFRCanvasProjector *window = static_cast<HFRCanvasProjector *>(data);
+ 	if (!window || !window->ready || !window->canvas) {
+ 		return;
+ 	}
+ 	obs_render_canvas_texture(window->canvas);
++
++	if (window->HasSafeArea()) {
++		gs_viewport_push();
++		gs_projection_push();
++		gs_set_viewport(0, 0, (int)cx, (int)cy);
++		gs_ortho(0.0f, (float)cx, 0.0f, (float)cy, -100.0f, 100.0f);
++		DrawSafeAreaRect(cx, cy, 0.05f, 0x66FFFFFF); /* 90% */
++		DrawSafeAreaRect(cx, cy, 0.10f, 0x66FF4040); /* 80% */
++		gs_projection_pop();
++		gs_viewport_pop();
++	}
+ }
+ 
+ /* --------------------------- HFRConsoleDock --------------------------- */
+@@ -167,9 +213,11 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 
+ 	QHBoxLayout *actRow = new QHBoxLayout();
+ 	btnTest = new QPushButton(QStringLiteral("填充测试色"), panel);
++	btnSafeArea = new QPushButton(QStringLiteral("安全区"), panel);
+ 	btnProject = new QPushButton(QStringLiteral("▶投影选中屏"), panel);
+ 	btnStopAll = new QPushButton(QStringLiteral("■全部关闭"), panel);
+ 	actRow->addWidget(btnTest);
++	actRow->addWidget(btnSafeArea);
+ 	actRow->addWidget(btnProject);
+ 	actRow->addWidget(btnStopAll);
+ 	layout->addLayout(actRow);
+@@ -189,6 +237,7 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnRemove, &QPushButton::clicked, this, [this]() { RemoveSelectedCanvas(); });
+ 	connect(btnRename, &QPushButton::clicked, this, [this]() { RenameSelectedCanvas(); });
+ 	connect(btnTest, &QPushButton::clicked, this, [this]() { SetTestColorOnSelected(); });
++	connect(btnSafeArea, &QPushButton::clicked, this, [this]() { ToggleSafeAreaOnSelected(); });
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+@@ -463,6 +512,7 @@ void HFRConsoleDock::ProjectCanvasToMonitor(obs_canvas_t *cv, int mRow)
+ 	}
+ 	HFRProjection pr;
+ 	pr.window = new HFRCanvasProjector(cv, screens.at(mRow), nullptr);
++	pr.window->SetSafeArea(safeAreaPref.value(cv, false));
+ 	pr.canvas = cv;
+ 	pr.screenIndex = mRow;
+ 	projections.append(pr);
+@@ -485,6 +535,29 @@ void HFRConsoleDock::ProjectSelected()
+ 	ProjectCanvasToMonitor(cv, mRow);
+ }
+ 
++void HFRConsoleDock::ToggleSafeAreaOnSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	bool on = !safeAreaPref.value(cv, false);
++	safeAreaPref.insert(cv, on);
++	int n = 0;
++	for (HFRProjection &pr : projections) {
++		if (pr.canvas == cv && pr.window) {
++			pr.window->SetSafeArea(on);
++			n++;
++		}
++	}
++	status->setText(QStringLiteral("%1 安全区：%2（作用于 %3 个投影；新投影自动沿用）")
++				.arg(QString::fromUtf8(obs_canvas_get_name(cv)))
++				.arg(on ? QStringLiteral("开") : QStringLiteral("关"))
++				.arg(n));
++	HfrLog(on ? "safe area ON" : "safe area OFF");
++}
++
+ void HFRConsoleDock::StopProjectionOfSelected()
+ {
+ 	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 35e6111..7ad7677 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -41,10 +41,14 @@ public:
+ 	HFRCanvasProjector(obs_canvas_t *canvas, QScreen *screen, QWidget *parent = nullptr);
+ 	~HFRCanvasProjector() override;
+ 
++	void SetSafeArea(bool on) { safeArea = on; }
++	bool HasSafeArea() const { return safeArea; }
++
+ private:
+ 	static void Draw(void *data, uint32_t cx, uint32_t cy);
+ 	obs_canvas_t *canvas = nullptr;
+ 	bool ready = false;
++	bool safeArea = false;
+ };
+ 
+ /* 投影记录：画布 → 屏编号（矩阵内受管，可单独停止） */
+@@ -72,6 +76,7 @@ public:
+ 	void StopProjectionOfSelected();
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
++	void ToggleSafeAreaOnSelected(); /* 选中画布的投影：安全区网格开关 */
+ 	void SetTestColorOnSelected(); /* 给选中画布就地填一块测试色 */
+ 	void SetCanvasTestColor(obs_canvas_t *cv);
+ 
+@@ -87,6 +92,7 @@ private:
+ 	QPushButton *btnRename = nullptr;
+ 	QPushButton *btnTest = nullptr;
+ 	QPushButton *btnProject = nullptr;
++	QPushButton *btnSafeArea = nullptr;
+ 	QPushButton *btnStopOne = nullptr;
+ 	QPushButton *btnStopAll = nullptr;
+ 	QLabel *status = nullptr;
+@@ -94,5 +100,6 @@ private:
+ 	QVector<obs_canvas_t *> canvases;                 /* 本坞创建/持有的用户画布（强引用） */
+ 	QVector<HFRProjection> projections; /* 受管投影记录 */
+ 	QHash<obs_canvas_t *, bool> testSceneAdded;       /* 是否已加测试色场景 */
++	QHash<obs_canvas_t *, bool> safeAreaPref;         /* 每画布安全区开关记忆 */
+ 	static HFRConsoleDock *s_instance;
+ };
+\ No newline at end of file
+-- 
+2.55.0.windows.5
+

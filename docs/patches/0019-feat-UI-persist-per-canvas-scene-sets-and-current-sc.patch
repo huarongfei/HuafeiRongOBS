@@ -1,0 +1,177 @@
+From 2d1b0a907f7b489b44679c169b54689f8ab3cb47 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 20:22:33 +0800
+Subject: [PATCH 19/19] feat(UI): persist per-canvas scene sets and current
+ scene (with test-color scene content rebuild)
+
+---
+ frontend/widgets/HFRConsole.cpp | 124 +++++++++++++++++++-------------
+ 1 file changed, 73 insertions(+), 51 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 6c4361e..a23adab 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -301,6 +301,38 @@ HFRConsoleDock::~HFRConsoleDock()
+ 	s_instance = nullptr;
+ }
+ 
++/* 往指定场景加入一块按画布分辨率铺满的色块 */
++static void AddColorIntoScene(obs_canvas_t *cv, obs_scene_t *sc, const QString &srcName)
++{
++	if (!cv || !sc) {
++		return;
++	}
++	struct obs_video_info ovi = {};
++	uint32_t w = 1280, h = 720;
++	if (obs_canvas_get_video_info(cv, &ovi) && ovi.base_width && ovi.base_height) {
++		w = ovi.base_width;
++		h = ovi.base_height;
++	}
++	obs_data_t *s = obs_data_create();
++	obs_data_set_int(s, "color", 0xFF00C8FF);
++	obs_data_set_int(s, "width", (long long)w);
++	obs_data_set_int(s, "height", (long long)h);
++	obs_source_t *cs = obs_source_create("color_source_v3", srcName.toUtf8().constData(), s, nullptr);
++	obs_data_release(s);
++	if (!cs) {
++		return;
++	}
++	obs_sceneitem_t *it = obs_scene_add(sc, cs);
++	if (it) {
++		obs_sceneitem_set_bounds_type(it, OBS_BOUNDS_STRETCH);
++		struct vec2 sz = {(float)w, (float)h};
++		obs_sceneitem_set_bounds(it, &sz);
++		struct vec2 pos = {0.0f, 0.0f};
++		obs_sceneitem_set_pos(it, &pos);
++	}
++	obs_source_release(cs);
++}
++
+ /* 枚举回调：收集画布内场景（先收集后移除，避免遍历中修改） */
+ static bool CollectSceneCallback(void *param, obs_source_t *sceneSource)
+ {
+@@ -591,34 +623,8 @@ void HFRConsoleDock::FillColorIntoSelectedScene()
+ 		return;
+ 	}
+ 
+-	struct obs_video_info ovi = {};
+-	uint32_t w = 1280, h = 720;
+-	if (obs_canvas_get_video_info(cv, &ovi) && ovi.base_width && ovi.base_height) {
+-		w = ovi.base_width;
+-		h = ovi.base_height;
+-	}
+-
+-	obs_data_t *s = obs_data_create();
+-	obs_data_set_int(s, "color", 0xFF00C8FF);
+-	obs_data_set_int(s, "width", (long long)w);
+-	obs_data_set_int(s, "height", (long long)h);
+-	const QByteArray scn = obs_source_get_name(scSrc);
+-	obs_source_t *cs = obs_source_create("color_source_v3", (scn + " · 色块").constData(), s, nullptr);
+-	obs_data_release(s);
+-	if (!cs) {
+-		status->setText(QStringLiteral("创建色块失败"));
+-		return;
+-	}
+-	obs_sceneitem_t *it = obs_scene_add(sc, cs);
+-	if (it) {
+-		obs_sceneitem_set_bounds_type(it, OBS_BOUNDS_STRETCH);
+-		struct vec2 sz = {(float)w, (float)h};
+-		obs_sceneitem_set_bounds(it, &sz);
+-		struct vec2 pos = {0.0f, 0.0f};
+-		obs_sceneitem_set_pos(it, &pos);
+-	}
+-	obs_source_release(cs);
+-	status->setText(QStringLiteral("已给场景加色块（%1x%2）").arg(w).arg(h));
++	AddColorIntoScene(cv, sc, QString::fromUtf8(obs_source_get_name(scSrc)) + QStringLiteral(" · 色块"));
++	status->setText(QStringLiteral("已给场景加色块"));
+ 	HfrLog("color added into canvas scene");
+ }
+ 
+@@ -660,6 +666,17 @@ void HFRConsoleDock::SaveState()
+ 		o[QStringLiteral("h")] = (int)ovi.base_height;
+ 		o[QStringLiteral("test")] = testSceneAdded.value(cv, false);
+ 		o[QStringLiteral("safe")] = safeAreaPref.value(cv, false);
++
++		QJsonArray scenesArr;
++		std::vector<obs_source_t *> scenes;
++		obs_canvas_enum_scenes(cv, CollectSceneSourcesCallback, &scenes);
++		for (obs_source_t *s : scenes) {
++			scenesArr.append(QString::fromUtf8(obs_source_get_name(s)));
++		}
++		o[QStringLiteral("scenes")] = scenesArr;
++
++		obs_source_t *cur = obs_canvas_get_channel(cv, 0);
++		o[QStringLiteral("cur")] = cur ? QString::fromUtf8(obs_source_get_name(cur)) : QString();
+ 		canvasArr.append(o);
+ 	}
+ 
+@@ -729,8 +746,34 @@ void HFRConsoleDock::LoadState()
+ 		}
+ 		canvases.append(cv);
+ 		safeAreaPref.insert(cv, o.value(QStringLiteral("safe")).toBool(false));
+-		if (o.value(QStringLiteral("test")).toBool(false)) {
++
++		const bool isTest = o.value(QStringLiteral("test")).toBool(false);
++		const QString curName = o.value(QStringLiteral("cur")).toString();
++		const QJsonArray scenesArr = o.value(QStringLiteral("scenes")).toArray();
++
++		if (scenesArr.isEmpty() && isTest) {
++			/* 兼容旧存档：只有 test 标记 */
+ 			SetCanvasTestColor(cv);
++			testSceneAdded.insert(cv, true);
++		} else {
++			for (const QJsonValue &sv : scenesArr) {
++				const QString sname = sv.toString();
++				if (sname.isEmpty()) {
++					continue;
++				}
++				obs_scene_t *sc = obs_canvas_scene_create(cv, sname.toUtf8().constData());
++				if (!sc) {
++					continue;
++				}
++				/* 测试色场景：重建其色块内容 */
++				if (isTest && sname.endsWith(QStringLiteral(" · 测试色块"))) {
++					AddColorIntoScene(cv, sc, sname.left(sname.length() - QStringLiteral("块").length()) + QStringLiteral("色"));
++					testSceneAdded.insert(cv, true);
++				}
++				if (!curName.isEmpty() && sname == curName) {
++					obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
++				}
++			}
+ 		}
+ 	}
+ 
+@@ -846,28 +889,7 @@ void HFRConsoleDock::SetCanvasTestColor(obs_canvas_t *cv)
+ 		h = ovi.base_height;
+ 	}
+ 
+-	obs_data_t *s = obs_data_create();
+-	obs_data_set_int(s, "color", 0xFF00C8FF);
+-	obs_data_set_int(s, "width", (long long)w);
+-	obs_data_set_int(s, "height", (long long)h);
+-	const std::string colorSrcName = canvasName.toStdString() + " · 测试色";
+-	obs_source_t *cs = obs_source_create("color_source_v3", colorSrcName.c_str(), s, nullptr);
+-	obs_data_release(s);
+-	if (!cs) {
+-		status->setText(QStringLiteral("创建色源失败"));
+-		HfrLog("color source create FAILED");
+-		return;
+-	}
+-
+-	obs_sceneitem_t *item = obs_scene_add(sc, cs);
+-	if (item) {
+-		obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
+-		struct vec2 sz = {(float)w, (float)h};
+-		obs_sceneitem_set_bounds(item, &sz);
+-		struct vec2 pos = {0.0f, 0.0f};
+-		obs_sceneitem_set_pos(item, &pos);
+-	}
+-	obs_source_release(cs);
++	AddColorIntoScene(cv, sc, canvasName + QStringLiteral(" · 测试色"));
+ 
+ 	obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
+ 	testSceneAdded.insert(cv, true);
+-- 
+2.55.0.windows.5
+

@@ -1,0 +1,49 @@
+From 277febe2bd0d1cce7a6735f357dad5f54c6a5358 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:58:19 +0800
+Subject: [PATCH 10/19] =?UTF-8?q?feat(UI):=20S3a=20managed=20projections?=
+ =?UTF-8?q?=20=E2=80=94=20dedupe=20canvas+screen,=20stop=20per=20canvas,?=
+ =?UTF-8?q?=20auto-close=20on=20canvas=20delete?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.hpp | 14 +++++++-------
+ 1 file changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index b528ea2..856719b 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -35,13 +35,6 @@ private:
+ 	bool ready = false;
+ };
+ 
+-/* 投影记录：画布 → 屏编号（矩阵内受管，可单独停止） */
+-struct HFRProjection {
+-	QPointer<HFRCanvasProjector> window;
+-	obs_canvas_t *canvas = nullptr;
+-	int screenIndex = -1;
+-};
+-
+ /* 画布投影窗：画布 → 指定编号显示器（全屏、受管） */
+ class HFRCanvasProjector : public OBSQTDisplay {
+ public:
+@@ -54,6 +47,13 @@ private:
+ 	bool ready = false;
+ };
+ 
++/* 投影记录：画布 → 屏编号（矩阵内受管，可单独停止） */
++struct HFRProjection {
++	QPointer<HFRCanvasProjector> window;
++	obs_canvas_t *canvas = nullptr;
++	int screenIndex = -1;
++};
++
+ /* 输出矩阵 / 导播坞 */
+ class HFRConsoleDock : public QDockWidget {
+ public:
+-- 
+2.55.0.windows.5
+

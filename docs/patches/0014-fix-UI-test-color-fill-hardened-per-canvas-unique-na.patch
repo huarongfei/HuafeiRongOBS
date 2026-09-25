@@ -1,0 +1,96 @@
+From d3450c1efe3815e4ce4eeb2f9a9f1bf347b101be Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 12 Sep 2026 20:02:57 +0800
+Subject: [PATCH 14/19] =?UTF-8?q?fix(UI):=20test-color=20fill=20hardened?=
+ =?UTF-8?q?=20=E2=80=94=20per-canvas=20unique=20names,=20sized=20to=20canv?=
+ =?UTF-8?q?as=20resolution,=20failure=20feedback?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.cpp | 57 ++++++++++++++++++++++++---------
+ 1 file changed, 42 insertions(+), 15 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 63cbbde..f836994 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -453,32 +453,59 @@ void HFRConsoleDock::SetCanvasTestColor(obs_canvas_t *cv)
+ 		status->setText(QStringLiteral("主画布由主界面管理，测试色仅用于用户画布"));
+ 		return;
+ 	}
+-	if (testSceneAdded.value(cv, false)) {
+-		return;
++	/* 已填充检测：直接看通道 0 是否已是本画布的测试场景（比内存标记更可靠） */
++	const QByteArray canvasName = obs_canvas_get_name(cv);
++	const std::string testSceneName = canvasName.toStdString() + " · 测试色块";
++	if (obs_source_t *cur = obs_canvas_get_channel(cv, 0)) {
++		const char *curName = obs_source_get_name(cur);
++		if (curName && testSceneName == curName) {
++			status->setText(QStringLiteral("该画布已填充测试色"));
++			return;
++		}
+ 	}
+ 
+-	obs_scene_t *sc = obs_canvas_scene_create(cv, "测试色块");
++	/* 名称按画布唯一化，避免多画布重名导致场景创建失败（表现为黑屏） */
++	obs_scene_t *sc = obs_canvas_scene_create(cv, testSceneName.c_str());
+ 	if (!sc) {
++		status->setText(QStringLiteral("创建测试场景失败（名称冲突？）"));
++		HfrLog("test scene create FAILED");
+ 		return;
+ 	}
++
++	/* 色块尺寸 = 该画布基础分辨率，并拉伸铺满，任何分辨率/宽高比都正确 */
++	struct obs_video_info ovi = {};
++	uint32_t w = 1280, h = 720;
++	if (obs_canvas_get_video_info(cv, &ovi) && ovi.base_width && ovi.base_height) {
++		w = ovi.base_width;
++		h = ovi.base_height;
++	}
++
+ 	obs_data_t *s = obs_data_create();
+ 	obs_data_set_int(s, "color", 0xFF00C8FF);
+-	obs_data_set_int(s, "width", 1920);
+-	obs_data_set_int(s, "height", 1080);
+-	obs_source_t *cs = obs_source_create("color_source_v3", "测试色", s, nullptr);
++	obs_data_set_int(s, "width", (long long)w);
++	obs_data_set_int(s, "height", (long long)h);
++	const std::string colorSrcName = canvasName.toStdString() + " · 测试色";
++	obs_source_t *cs = obs_source_create("color_source_v3", colorSrcName.c_str(), s, nullptr);
+ 	obs_data_release(s);
+-	if (cs) {
+-		obs_sceneitem_t *item = obs_scene_add(sc, cs);
+-		if (item) {
+-			obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
+-			struct vec2 sz = {(float)1920, (float)1080};
+-			obs_sceneitem_set_bounds(item, &sz);
+-		}
+-		obs_source_release(cs);
++	if (!cs) {
++		status->setText(QStringLiteral("创建色源失败"));
++		HfrLog("color source create FAILED");
++		return;
+ 	}
++
++	obs_sceneitem_t *item = obs_scene_add(sc, cs);
++	if (item) {
++		obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
++		struct vec2 sz = {(float)w, (float)h};
++		obs_sceneitem_set_bounds(item, &sz);
++		obs_sceneitem_set_pos(item, &(struct vec2){0.0f, 0.0f});
++	}
++	obs_source_release(cs);
++
+ 	obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
+ 	testSceneAdded.insert(cv, true);
+-	HfrLog("test color scene added to canvas");
++	HfrLog("test color scene added to canvas (sized to canvas)");
++	status->setText(QStringLiteral("已填充测试色（%1x%2 铺满）").arg(w).arg(h));
+ }
+ 
+ void HFRConsoleDock::SetTestColorOnSelected()
+-- 
+2.55.0.windows.5
+

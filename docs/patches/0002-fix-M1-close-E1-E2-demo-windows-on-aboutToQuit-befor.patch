@@ -1,0 +1,73 @@
+From 9eba3e56bb8440c7767ec128b236c886a2485b4c Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:28:58 +0800
+Subject: [PATCH 02/19] fix(M1): close E1/E2 demo windows on aboutToQuit before
+ obs_shutdown (shutdown c0000005)
+
+---
+ frontend/widgets/HFRSpike.cpp | 9 +++++++++
+ frontend/widgets/HFRSpike.hpp | 3 ++-
+ frontend/widgets/OBSBasic.cpp | 5 +++++
+ 3 files changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/frontend/widgets/HFRSpike.cpp b/frontend/widgets/HFRSpike.cpp
+index 4e6b1e1..4656f46 100644
+--- a/frontend/widgets/HFRSpike.cpp
++++ b/frontend/widgets/HFRSpike.cpp
+@@ -144,3 +144,12 @@ void HFRCanvasWindow::OpenE2()
+ 	OpenWindowFor(cv, QStringLiteral("HFR-E2 Canvas (independent demo)"), s_e2);
+ 	HfrLog("E2", "window created");
+ }
++void HFRCanvasWindow::CloseAll()
++{
++	if (s_e1) {
++		s_e1->close();
++	}
++	if (s_e2) {
++		s_e2->close();
++	}
++}
+diff --git a/frontend/widgets/HFRSpike.hpp b/frontend/widgets/HFRSpike.hpp
+index 4181fa1..8df3e2e 100644
+--- a/frontend/widgets/HFRSpike.hpp
++++ b/frontend/widgets/HFRSpike.hpp
+@@ -19,10 +19,11 @@ public:
+ 
+ 	static void OpenE1(); /* clone demo */
+ 	static void OpenE2(); /* independent color-canvas demo */
++	static void CloseAll(); /* 退出前主动关闭演示窗口，避免与 obs_shutdown 竞争 */
+ 
+ private:
+ 	static void Draw(void *data, uint32_t cx, uint32_t cy);
+ 
+ 	obs_canvas_t *canvas = nullptr;
+ 	bool ready = false;
+-};
++};
+\ No newline at end of file
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index 4d2f8e2..cde7fba 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -58,6 +58,7 @@
+ #include <qt-wrappers.hpp>
+ 
+ #include <QActionGroup>
++#include <QCoreApplication>
+ #include <QMenu>
+ #include <QMenuBar>
+ #include <QThread>
+@@ -1047,6 +1048,10 @@ void OBSBasic::OBSInit()
+ 		if (qEnvironmentVariableIsSet("HFR_E1_AUTO")) {
+ 			QTimer::singleShot(4000, []() { HFRCanvasWindow::OpenE1(); });
+ 		}
++		/* 退出前先关演示窗口，避免画布释放与 obs_shutdown 竞争（曾致 c0000005） */
++		connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, []() {
++			HFRCanvasWindow::CloseAll();
++		});
+ 	}
+ 
+ 	/* hack to prevent elgato from loading its own QtNetwork that it tries
+-- 
+2.55.0.windows.5
+

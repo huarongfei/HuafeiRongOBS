@@ -1,0 +1,64 @@
+From d8e0d380d697f6777702d43e588c4607b5272a70 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:52:57 +0800
+Subject: [PATCH 08/19] feat(UI): create-canvas dialog with name and base
+ resolution
+
+---
+ frontend/widgets/HFRConsole.cpp | 30 ++++++++++++++++++++++++++----
+ 1 file changed, 26 insertions(+), 4 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index f963fa7..3fed9ec 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -271,12 +271,34 @@ obs_canvas_t *HFRConsoleDock::CanvasFromRow(int row) const
+ 
+ void HFRConsoleDock::CreateCanvas()
+ {
++	bool okName = false;
++	QString name = QInputDialog::getText(this, QStringLiteral("新建画布"),
++					     QStringLiteral("画布名称"), QLineEdit::Normal,
++					     QStringLiteral("画布"), &okName);
++	if (!okName || name.trimmed().isEmpty()) {
++		return;
++	}
++
++	const QStringList resList = {QStringLiteral("1280x720"), QStringLiteral("1920x1080"),
++				     QStringLiteral("960x540"), QStringLiteral("2560x1440")};
++	bool okRes = false;
++	QString res = QInputDialog::getItem(this, QStringLiteral("新建画布"),
++					    QStringLiteral("基础分辨率（帧率随全局）"),
++					    resList, 0, false, &okRes);
++	if (!okRes || res.isEmpty()) {
++		return;
++	}
++	QStringList wh = res.split('x');
++	if (wh.size() != 2) {
++		return;
++	}
++
+ 	struct obs_video_info ovi = {};
+ 	obs_get_video_info(&ovi);
+-	ovi.base_width = 1280;
+-	ovi.base_height = 720;
++	ovi.base_width = wh.at(0).toUInt();
++	ovi.base_height = wh.at(1).toUInt();
+ 
+-	obs_canvas_t *cv = obs_canvas_create("画布", &ovi, ACTIVATE | SCENE_REF);
++	obs_canvas_t *cv = obs_canvas_create(name.trimmed().toUtf8().constData(), &ovi, ACTIVATE | SCENE_REF);
+ 	if (!cv) {
+ 		status->setText(QStringLiteral("新建画布失败"));
+ 		return;
+@@ -284,7 +306,7 @@ void HFRConsoleDock::CreateCanvas()
+ 	canvases.append(cv);
+ 	RefreshCanvasList();
+ 	canvasList->setCurrentRow(canvasList->count() - 1);
+-	HfrLog("created canvas");
++	HfrLog("created canvas with chosen name/resolution");
+ 	status->setText(QStringLiteral("已新建画布：%1（点“填充测试色”即可见内容）")
+ 				.arg(QString::fromUtf8(obs_canvas_get_name(cv))));
+ }
+-- 
+2.55.0.windows.5
+

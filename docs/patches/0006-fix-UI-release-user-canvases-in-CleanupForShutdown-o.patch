@@ -1,0 +1,83 @@
+From 26ca11e9eb6087673afb4788a6e5e71a64f72286 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sun, 6 Sep 2026 06:48:11 +0800
+Subject: [PATCH 06/19] fix(UI): release user canvases in CleanupForShutdown on
+ aboutToQuit (shutdown race c0000005)
+
+---
+ frontend/widgets/HFRConsole.cpp | 9 +++++++--
+ frontend/widgets/HFRConsole.hpp | 3 ++-
+ frontend/widgets/OBSBasic.cpp   | 4 ++--
+ 3 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 11caf39..c3b6ca6 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -191,6 +191,12 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ }
+ 
+ HFRConsoleDock::~HFRConsoleDock()
++{
++	CleanupForShutdown();
++	s_instance = nullptr;
++}
++
++void HFRConsoleDock::CleanupForShutdown()
+ {
+ 	CloseAllProjectors();
+ 	for (obs_canvas_t *cv : canvases) {
+@@ -201,7 +207,6 @@ HFRConsoleDock::~HFRConsoleDock()
+ 	}
+ 	canvases.clear();
+ 	testSceneAdded.clear();
+-	s_instance = nullptr;
+ }
+ 
+ void HFRConsoleDock::RefreshMonitors()
+@@ -376,4 +381,4 @@ void HFRConsoleDock::CloseAllProjectors()
+ 		}
+ 	}
+ 	projectors.clear();
+-}
++}
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index cecc034..bc49a3d 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -61,6 +61,7 @@ public:
+ 	void RemoveSelectedCanvas();
+ 	void ProjectSelected();
+ 	void CloseAllProjectors();
++	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
+ 	void SetTestColorOnSelected(); /* 给选中画布就地填一块测试色 */
+ 	void SetCanvasTestColor(obs_canvas_t *cv);
+ 
+@@ -82,4 +83,4 @@ private:
+ 	QVector<QPointer<HFRCanvasProjector>> projectors; /* 受管投影窗 */
+ 	QHash<obs_canvas_t *, bool> testSceneAdded;       /* 是否已加测试色场景 */
+ 	static HFRConsoleDock *s_instance;
+-};
++};
+\ No newline at end of file
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index 6c3de9a..af01e51 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -1042,10 +1042,10 @@ void OBSBasic::OBSInit()
+ 		hfrDock->setObjectName(QStringLiteral("hfrOutputMatrixDock"));
+ 		addDockWidget(Qt::RightDockWidgetArea, hfrDock);
+ 		hfrDock->show();
+-		/* 退出前先关投影窗，避免画布释放与 obs_shutdown 竞争（曾致 c0000005） */
++		/* 退出前先释放投影窗与全部用户画布，避免与 obs_shutdown 竞争（曾致 c0000005） */
+ 		connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this, []() {
+ 			if (HFRConsoleDock::Get()) {
+-				HFRConsoleDock::Get()->CloseAllProjectors();
++				HFRConsoleDock::Get()->CleanupForShutdown();
+ 			}
+ 		});
+ 	}
+-- 
+2.55.0.windows.5
+

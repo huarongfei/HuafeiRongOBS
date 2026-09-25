@@ -1,0 +1,262 @@
+From 65e6a06c0fe2469bbce72ad507c1a4c86b6d6896 Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Sat, 5 Sep 2026 23:50:08 +0800
+Subject: [PATCH 01/19] feat(M1 spike): E1/E2 second-canvas demo window +
+ HFR(M1) menu (clone & independent color canvas)
+
+---
+ frontend/cmake/ui-widgets.cmake |   2 +
+ frontend/widgets/HFRSpike.cpp   | 146 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRSpike.hpp   |  28 ++++++
+ frontend/widgets/OBSBasic.cpp   |  19 +++++
+ 4 files changed, 195 insertions(+)
+ create mode 100644 frontend/widgets/HFRSpike.cpp
+ create mode 100644 frontend/widgets/HFRSpike.hpp
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index dd60fbe..ed62a0a 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -57,6 +57,8 @@ target_sources(
+     widgets/OBSProjector.hpp
+     widgets/OBSQTDisplay.cpp
+     widgets/OBSQTDisplay.hpp
++    widgets/HFRSpike.cpp
++    widgets/HFRSpike.hpp
+     widgets/StatusBarWidget.cpp
+     widgets/StatusBarWidget.hpp
+ )
+diff --git a/frontend/widgets/HFRSpike.cpp b/frontend/widgets/HFRSpike.cpp
+new file mode 100644
+index 0000000..4e6b1e1
+--- /dev/null
++++ b/frontend/widgets/HFRSpike.cpp
+@@ -0,0 +1,146 @@
++#include "HFRSpike.hpp"
++
++#include "OBSBasic.hpp"
++
++#include <QAction>
++#include <QPointer>
++
++#include <obs-module.h>
++
++static QPointer<HFRCanvasWindow> s_e1;
++static QPointer<HFRCanvasWindow> s_e2;
++
++static void HfrLog(const char *tag, const char *msg)
++{
++	blog(LOG_INFO, "[HFR-%s] %s", tag, msg);
++}
++
++HFRCanvasWindow::HFRCanvasWindow(obs_canvas_t *canvas_, const QString &title, QWidget *parent)
++	: OBSQTDisplay(parent), canvas(canvas_)
++{
++	setWindowTitle(title);
++	resize(640, 360);
++	setAttribute(Qt::WA_DeleteOnClose, true);
++	setAttribute(Qt::WA_QuitOnClose, false);
++
++	QAction *escapeAction = new QAction(this);
++	escapeAction->setShortcut(Qt::Key_Escape);
++	addAction(escapeAction);
++	connect(escapeAction, &QAction::triggered, this, &QWidget::close);
++
++	auto addDrawCallback = [this]() {
++		obs_display_add_draw_callback(GetDisplay(), &HFRCanvasWindow::Draw, this);
++		obs_display_set_background_color(GetDisplay(), 0x000000);
++	};
++	connect(this, &OBSQTDisplay::DisplayCreated, this, addDrawCallback);
++
++	ready = true;
++	show();
++	raise();
++	activateWindow();
++}
++
++HFRCanvasWindow::~HFRCanvasWindow()
++{
++	if (GetDisplay()) {
++		obs_display_remove_draw_callback(GetDisplay(), &HFRCanvasWindow::Draw, this);
++	}
++	if (canvas) {
++		obs_canvas_remove(canvas);
++		obs_canvas_release(canvas);
++		canvas = nullptr;
++	}
++}
++
++void HFRCanvasWindow::Draw(void *data, uint32_t, uint32_t)
++{
++	HFRCanvasWindow *window = static_cast<HFRCanvasWindow *>(data);
++	if (!window || !window->ready || !window->canvas) {
++		return;
++	}
++	obs_render_canvas_texture(window->canvas);
++}
++
++static obs_canvas_t *CreateHfrCanvas(const char *name, uint32_t baseW, uint32_t baseH)
++{
++	struct obs_video_info ovi = {};
++	obs_get_video_info(&ovi);
++	ovi.base_width = baseW;
++	ovi.base_height = baseH;
++	return obs_canvas_create(name, &ovi, ACTIVATE | SCENE_REF);
++}
++
++static void OpenWindowFor(obs_canvas_t *cv, const QString &title, QPointer<HFRCanvasWindow> &slot)
++{
++	if (slot) {
++		slot->raise();
++		slot->activateWindow();
++		return;
++	}
++	if (!cv) {
++		return;
++	}
++	slot = new HFRCanvasWindow(cv, title, nullptr);
++}
++
++void HFRCanvasWindow::OpenE1()
++{
++	HfrLog("E1", "open: clone canvas from current scene source");
++	OBSBasic *main = OBSBasic::Get();
++	if (!main) {
++		return;
++	}
++	if (s_e1) {
++		s_e1->raise();
++		s_e1->activateWindow();
++		return;
++	}
++	obs_canvas_t *cv = CreateHfrCanvas("HFR-E1", 960, 540);
++	if (!cv) {
++		HfrLog("E1", "obs_canvas_create failed");
++		return;
++	}
++	OBSSource curScene = main->GetCurrentSceneSource();
++	if (curScene) {
++		obs_canvas_set_channel(cv, 0, curScene);
++	}
++	OpenWindowFor(cv, QStringLiteral("HFR-E1 Canvas (clone demo)"), s_e1);
++	HfrLog("E1", "window created");
++}
++
++void HFRCanvasWindow::OpenE2()
++{
++	HfrLog("E2", "open: independent canvas with own color scene");
++	if (s_e2) {
++		s_e2->raise();
++		s_e2->activateWindow();
++		return;
++	}
++	obs_canvas_t *cv = CreateHfrCanvas("HFR-E2", 960, 540);
++	if (!cv) {
++		HfrLog("E2", "obs_canvas_create failed");
++		return;
++	}
++
++	obs_scene_t *sc = obs_canvas_scene_create(cv, "E2 Scene");
++	if (sc) {
++		obs_data_t *s = obs_data_create();
++		obs_data_set_int(s, "color", 0xFF00C8FF); /* 亮青 */
++		obs_data_set_int(s, "width", 1920);
++		obs_data_set_int(s, "height", 1080);
++		obs_source_t *cs = obs_source_create("color_source_v3", "E2 Color", s, nullptr);
++		obs_data_release(s);
++		if (cs) {
++			obs_sceneitem_t *item = obs_scene_add(sc, cs);
++			if (item) {
++				obs_sceneitem_set_bounds_type(item, OBS_BOUNDS_STRETCH);
++				struct vec2 sz = {960.0f, 540.0f};
++				obs_sceneitem_set_bounds(item, &sz);
++			}
++			obs_source_release(cs);
++		}
++		obs_canvas_set_channel(cv, 0, obs_scene_get_source(sc));
++	}
++	OpenWindowFor(cv, QStringLiteral("HFR-E2 Canvas (independent demo)"), s_e2);
++	HfrLog("E2", "window created");
++}
+diff --git a/frontend/widgets/HFRSpike.hpp b/frontend/widgets/HFRSpike.hpp
+new file mode 100644
+index 0000000..4181fa1
+--- /dev/null
++++ b/frontend/widgets/HFRSpike.hpp
+@@ -0,0 +1,28 @@
++#pragma once
++
++#include "OBSQTDisplay.hpp"
++
++#include <obs.hpp>
++
++/* ============================================================
++ * HFR M1 spike（temporary, milestone M1）
++ * 复用上游 obs_canvas 的运行时能力做最小演示：
++ *   E1 第二画布窗口（克隆）：canvas 通道0 = 当前主场景源 → 独立窗口显示同一画面。
++ *   E2 第二画布窗口（独立）：canvas 自带场景 + 色块源 → 独立窗口显示不同内容。
++ * 窗口 = OBSQTDisplay 子类 + obs_render_canvas_texture(canvas) 绘制该画布 mix 纹理。
++ * 说明：canvas flags 用 ACTIVATE|SCENE_REF（不含 MIX_AUDIO，避免音频重复）。
++ * ============================================================ */
++class HFRCanvasWindow : public OBSQTDisplay {
++public:
++	HFRCanvasWindow(obs_canvas_t *canvas, const QString &title, QWidget *parent = nullptr);
++	~HFRCanvasWindow() override;
++
++	static void OpenE1(); /* clone demo */
++	static void OpenE2(); /* independent color-canvas demo */
++
++private:
++	static void Draw(void *data, uint32_t cx, uint32_t cy);
++
++	obs_canvas_t *canvas = nullptr;
++	bool ready = false;
++};
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index b6f5445..4d2f8e2 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -21,6 +21,7 @@
+ #include "ui-config.h"
+ 
+ #include "ColorSelect.hpp"
++#include "HFRSpike.hpp"
+ #include "OBSBasicControls.hpp"
+ #include "OBSBasicStats.hpp"
+ #include "plugin-manager/PluginManager.hpp"
+@@ -57,7 +58,10 @@
+ #include <qt-wrappers.hpp>
+ 
+ #include <QActionGroup>
++#include <QMenu>
++#include <QMenuBar>
+ #include <QThread>
++#include <QTimer>
+ #include <QWidgetAction>
+ 
+ #include <mutex>
+@@ -1030,6 +1034,21 @@ void OBSBasic::OBSInit()
+ 	InitHotkeys();
+ 	ui->preview->Init();
+ 
++	/* HFR M1 spike (temporary): second-canvas demos */
++	{
++		blog(LOG_INFO, "[HFR] obsinit: registering HFR(M1) menu, env_auto=%d",
++		     (int)qEnvironmentVariableIsSet("HFR_E1_AUTO"));
++		QMenu *hfrMenu = new QMenu(QStringLiteral("HFR(M1)"), this);
++		QAction *e1Act = hfrMenu->addAction(QStringLiteral("E1: 第二画布窗口（克隆演示）"));
++		QAction *e2Act = hfrMenu->addAction(QStringLiteral("E2: 第二画布窗口（独立色块）"));
++		connect(e1Act, &QAction::triggered, this, []() { HFRCanvasWindow::OpenE1(); });
++		connect(e2Act, &QAction::triggered, this, []() { HFRCanvasWindow::OpenE2(); });
++		menuBar()->addMenu(hfrMenu);
++		if (qEnvironmentVariableIsSet("HFR_E1_AUTO")) {
++			QTimer::singleShot(4000, []() { HFRCanvasWindow::OpenE1(); });
++		}
++	}
++
+ 	/* hack to prevent elgato from loading its own QtNetwork that it tries
+ 	 * to ship with */
+ #if defined(_WIN32) && !defined(_DEBUG)
+-- 
+2.55.0.windows.5
+
