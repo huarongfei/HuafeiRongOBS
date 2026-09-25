@@ -1,0 +1,84 @@
+From 927f750cb0436e7c92266600739d58426d9ee947 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 19:38:56 +0800
+Subject: [PATCH 28/28] feat(ppt): embed LibreOffice runtime next to obs64.exe
+ (embedded-first lookup, CMake staging rule); add fetch script
+
+---
+ frontend/cmake/ui-widgets.cmake | 28 +++++++++++++++++++++++++++-
+ frontend/widgets/HFRPpt.cpp     | 13 ++++++++++++-
+ 2 files changed, 39 insertions(+), 2 deletions(-)
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index f1c6ea9..c67ad53 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -85,4 +85,30 @@ if(HFR_ENABLE_PPT)
+   target_include_directories(obs-studio PRIVATE "${HFR_LO_SDK_DIR}")
+   target_compile_definitions(obs-studio PRIVATE HFR_ENABLE_PPT)
+   message(STATUS "HuafeiRongOBS: PPT(LOK) enabled, SDK=${HFR_LO_SDK_DIR}")
+-endif()
+\ No newline at end of file
++endif()
++
++# ---------------------------------------------------------------------------
++# HuafeiRongOBS: 将 LibreOffice 运行时"嵌入"到程序目录（自包含分发）
++#   - 目标位置：<binary>/rundir/<Config>/bin/64bit/lo
++#   - HFRPpt 优先从"obs64.exe 同目录/lo"加载（见 HFRPpt::DefaultLoPath）
++#   - 新机器/新克隆：先运行 scripts/fetch-libreoffice-runtime.cmd 获取运行时
++#   关闭：-DHFR_EMBED_LO=OFF
++# ---------------------------------------------------------------------------
++option(HFR_EMBED_LO "Embed LibreOffice runtime next to obs64.exe (bin/64bit/lo)" ON)
++if(HFR_EMBED_LO)
++  set(HFR_LO_RUNTIME_DIR "D:/HuafeirongOBS/tools/LibreOffice" CACHE PATH "LibreOffice runtime to embed (contains program/ and share/)")
++  if(EXISTS "${HFR_LO_RUNTIME_DIR}/program/mergedlo.dll")
++    add_custom_command(
++      TARGET obs-studio POST_BUILD
++      COMMAND "${CMAKE_COMMAND}" -E echo "HuafeiRongOBS: embedding LibreOffice runtime -> bin/64bit/lo"
++      COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different
++              "${HFR_LO_RUNTIME_DIR}"
++              "${CMAKE_BINARY_DIR}/rundir/$<CONFIG>/bin/64bit/lo"
++      COMMENT "Embed LibreOffice runtime (only changed files are copied)"
++      VERBATIM
++    )
++    message(STATUS "HuafeiRongOBS: LO runtime will be embedded from ${HFR_LO_RUNTIME_DIR}")
++  else()
++    message(STATUS "HuafeiRongOBS: HFR_EMBED_LO=ON but runtime not found at ${HFR_LO_RUNTIME_DIR} (skip embedding)")
++  endif()
++endif()
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+index bbddac1..0614a30 100644
+--- a/frontend/widgets/HFRPpt.cpp
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -1,5 +1,6 @@
+ #include "HFRPpt.hpp"
+ 
++#include <QCoreApplication>
+ #include <QDir>
+ #include <QFile>
+ #include <QFileInfo>
+@@ -262,10 +263,20 @@ HFRPpt &HFRPpt::Instance()
+ 
+ QString HFRPpt::DefaultLoPath()
+ {
++	/* 1) 嵌入式运行时：与 obs64.exe 同目录的 lo\（随程序分发，开箱即用） */
++	const QString embedded = QCoreApplication::applicationDirPath() + QStringLiteral("/lo");
++	if (QFile::exists(embedded + QStringLiteral("/program/mergedlo.dll"))) {
++		return embedded;
++	}
++	/* 2) 显式指定的安装目录 */
+ 	const QByteArray env = qgetenv("HFR_LO_PATH");
+ 	if (!env.isEmpty()) {
+-		return QString::fromLocal8Bit(env);
++		const QString p = QString::fromLocal8Bit(env);
++		if (QFile::exists(p + QStringLiteral("/program/mergedlo.dll"))) {
++			return p;
++		}
+ 	}
++	/* 3) 开发机默认解包目录 */
+ 	return QStringLiteral("D:/HuafeirongOBS/tools/LibreOffice");
+ }
+ 
+-- 
+2.55.0.windows.5
+
