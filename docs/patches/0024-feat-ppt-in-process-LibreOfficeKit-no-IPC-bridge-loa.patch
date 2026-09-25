@@ -1,7 +1,7 @@
 From 3ba951128c0e3a9a856bc84466d62f9a4195f972 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:07:04 +0800
-Subject: [PATCH 24/25] =?UTF-8?q?feat(ppt):=20in-process=20LibreOfficeKit?=
+Subject: [PATCH 24/26] =?UTF-8?q?feat(ppt):=20in-process=20LibreOfficeKit?=
  =?UTF-8?q?=20(no=20IPC=20bridge)=20=E2=80=94=20load=20mergedlo,=20lok=5Fp?=
  =?UTF-8?q?reinit=5F2,=20documentLoad/paintTile/paging;=20console=20PPT=20?=
  =?UTF-8?q?row=20+=20unattended=20autotest=20hook?=

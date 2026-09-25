@@ -1,0 +1,153 @@
+From 4347dc570b0ec2ed50ee7aa538147ca95fb96753 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 19:25:52 +0800
+Subject: [PATCH 26/26] refactor: centralize HFR entry declarations
+ (HfrRegisterPptSource/HfrPptTestOutputDir) in HFRPpt.hpp; drop local forward
+ decls and duplicate impl
+
+---
+ frontend/widgets/HFRConsole.cpp   | 21 +++------------------
+ frontend/widgets/HFRPpt.cpp       | 17 ++++++++++++++++-
+ frontend/widgets/HFRPpt.hpp       | 13 ++++++++++++-
+ frontend/widgets/HFRPptSource.hpp |  7 ++++---
+ 4 files changed, 35 insertions(+), 23 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 67c51a1..cf3e432 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -33,8 +33,7 @@
+ 
+ HFRConsoleDock *HFRConsoleDock::s_instance = nullptr;
+ 
+-/* 前置声明：定义在文件下部（PPT 段），构造函数里的自检钩子会用到 */
+-static QString PptTestOutputDir();
++/* PPT 相关入口声明见 HFRPpt.hpp（HfrPptTestOutputDir / HfrRegisterPptSource） */
+ 
+ static void HfrLog(const char *msg)
+ {
+@@ -347,7 +346,7 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 				blog(LOG_WARNING, "[HFR-PPT] autotest open failed: %s", err.toUtf8().constData());
+ 				return;
+ 			}
+-			const QString out = PptTestOutputDir() + QStringLiteral("/hfr_ppt_autotest.bmp");
++			const QString out = HfrPptTestOutputDir() + QStringLiteral("/hfr_ppt_autotest.bmp");
+ 			if (ppt.RenderToBmpForTest(1280, 720, out, &stats, &err)) {
+ 				blog(LOG_INFO, "[HFR-PPT] autotest OK: %s -> %s", stats.toUtf8().constData(), out.toUtf8().constData());
+ 			} else {
+@@ -1037,20 +1036,6 @@ void HFRConsoleDock::StopAllStreams()
+ 
+ /* ---------------- PPT（同进程 LibreOfficeKit，无 IPC 桥接） ---------------- */
+ 
+-static QString PptTestOutputDir()
+-{
+-	char *p = obs_frontend_get_current_profile_path();
+-	QString dir = p ? QString::fromUtf8(p) : QString();
+-	if (p) {
+-		bfree(p);
+-	}
+-	if (dir.isEmpty()) {
+-		dir = QDir::tempPath();
+-	}
+-	QDir().mkpath(dir);
+-	return dir;
+-}
+-
+ static void PptRenderAndReport(QLabel *status)
+ {
+ 	HFRPpt &ppt = HFRPpt::Instance();
+@@ -1058,7 +1043,7 @@ static void PptRenderAndReport(QLabel *status)
+ 		status->setText(QStringLiteral("PPT：尚未打开文件"));
+ 		return;
+ 	}
+-	const QString out = PptTestOutputDir() + QStringLiteral("/hfr_ppt_preview.bmp");
++	const QString out = HfrPptTestOutputDir() + QStringLiteral("/hfr_ppt_preview.bmp");
+ 	QString stats, err;
+ 	if (ppt.RenderToBmpForTest(1280, 720, out, &stats, &err)) {
+ 		status->setText(QStringLiteral("PPT 渲染成功：%1 → %2").arg(stats).arg(out));
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+index 27dd848..2f02bf1 100644
+--- a/frontend/widgets/HFRPpt.cpp
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -6,6 +6,7 @@
+ #include <QUrl>
+ 
+ #include <obs-module.h>
++#include <obs-frontend-api.h>
+ 
+ #ifdef HFR_ENABLE_PPT
+ /* LOK 的 paintTile/getParts/postUnoCommand 等成员受此宏保护 */
+@@ -215,6 +216,20 @@ bool HFRPptDocument::RenderCurrentPart(uint32_t, uint32_t, std::vector<uint8_t>
+ 
+ /* ================================ HFRPpt ================================ */
+ 
++QString HfrPptTestOutputDir()
++{
++	char *p = obs_frontend_get_current_profile_path();
++	QString dir = p ? QString::fromUtf8(p) : QString();
++	if (p) {
++		bfree(p);
++	}
++	if (dir.isEmpty()) {
++		dir = QDir::tempPath();
++	}
++	QDir().mkpath(dir);
++	return dir;
++}
++
+ HFRPpt &HFRPpt::Instance()
+ {
+ 	static HFRPpt inst;
+@@ -412,4 +427,4 @@ bool HFRPpt::RenderToBmpForTest(uint32_t w, uint32_t h, const QString &bmpPath,
+ 				    .arg(PartCount());
+ 	}
+ 	return true;
+-}
++}
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRPpt.hpp b/frontend/widgets/HFRPpt.hpp
+index 7daf728..d868918 100644
+--- a/frontend/widgets/HFRPpt.hpp
++++ b/frontend/widgets/HFRPpt.hpp
+@@ -11,6 +11,17 @@
+  *   - 无 IPC 桥接；动画按"每页最终态"呈现（一期策略，见 docs/PPT-方案.md）
+  * ============================================================ */
+ 
++/* ============================================================
++ * 对外调用声明（跨文件统一从这里引用，避免各处 static 前置声明）
++ * ============================================================ */
++
++/* 注册 PPT 来源类型（来源→+ 里可见）。由 OBSBasic::OBSInit 调用；
++ * 未启用 HFR_ENABLE_PPT 时也安全（不注册并返回 false）。 */
++bool HfrRegisterPptSource();
++
++/* PPT 自检/预览输出目录（当前 profile 目录，取不到则系统临时目录） */
++QString HfrPptTestOutputDir();
++
+ class HFRPptDocument {
+ public:
+ 	HFRPptDocument() = default;
+@@ -70,4 +81,4 @@ private:
+ 	void *libHandle = nullptr;
+ 	void *kit = nullptr;
+ 	HFRPptDocument *inner = nullptr;
+-};
++};
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRPptSource.hpp b/frontend/widgets/HFRPptSource.hpp
+index 3d78690..11761f7 100644
+--- a/frontend/widgets/HFRPptSource.hpp
++++ b/frontend/widgets/HFRPptSource.hpp
+@@ -1,5 +1,6 @@
+ #pragma once
+ 
+-/* 注册 HuafeiRongOBS 的 PPT 来源类型（"来源→+" 里可见）。
+- * 未启用 HFR_ENABLE_PPT 时也会注册，但加载文件会给出明确错误提示。 */
+-bool HfrRegisterPptSource();
++/* PPT 来源类型注册入口。
++ * 声明统一放在 HFRPpt.hpp（跨文件调用点都从那里引用），这里仅做转发包含，
++ * 便于调用方只 include 一个头就能拿到声明。 */
++#include "HFRPpt.hpp"
+-- 
+2.55.0.windows.5
+

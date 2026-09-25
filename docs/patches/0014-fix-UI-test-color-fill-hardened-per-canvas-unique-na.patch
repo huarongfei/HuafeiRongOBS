@@ -1,7 +1,7 @@
 From d3450c1efe3815e4ce4eeb2f9a9f1bf347b101be Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 20:02:57 +0800
-Subject: [PATCH 14/25] =?UTF-8?q?fix(UI):=20test-color=20fill=20hardened?=
+Subject: [PATCH 14/26] =?UTF-8?q?fix(UI):=20test-color=20fill=20hardened?=
  =?UTF-8?q?=20=E2=80=94=20per-canvas=20unique=20names,=20sized=20to=20canv?=
  =?UTF-8?q?as=20resolution,=20failure=20feedback?=
 MIME-Version: 1.0
