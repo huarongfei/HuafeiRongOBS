@@ -1,7 +1,7 @@
 From 927f750cb0436e7c92266600739d58426d9ee947 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:38:56 +0800
-Subject: [PATCH 28/28] feat(ppt): embed LibreOffice runtime next to obs64.exe
+Subject: [PATCH 28/29] feat(ppt): embed LibreOffice runtime next to obs64.exe
  (embedded-first lookup, CMake staging rule); add fetch script
 
 ---

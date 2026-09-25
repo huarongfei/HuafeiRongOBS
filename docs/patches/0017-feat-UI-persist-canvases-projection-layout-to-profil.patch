@@ -1,7 +1,7 @@
 From 008df4af47ff2ad18fba68c02f57a82c79da64c1 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 20:14:36 +0800
-Subject: [PATCH 17/28] feat(UI): persist canvases & projection layout to
+Subject: [PATCH 17/29] feat(UI): persist canvases & projection layout to
  profile JSON (hfr_canvases.json) with restore on start
 
 ---

@@ -1,0 +1,661 @@
+From cfd3a20f95cbb700540b4d6c143eaf0f94497400 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 19:53:38 +0800
+Subject: [PATCH 29/29] feat(ppt): presenter view window (current slide + notes
+ + next preview, global paging for clickers) bound to the PPT source document
+
+---
+ frontend/cmake/ui-widgets.cmake   |   4 +-
+ frontend/widgets/HFRConsole.cpp   |  51 +++++++
+ frontend/widgets/HFRConsole.hpp   |   1 +
+ frontend/widgets/HFRPpt.cpp       |  77 ++++++++++
+ frontend/widgets/HFRPpt.hpp       |   9 ++
+ frontend/widgets/HFRPptSource.cpp |  59 ++++++++
+ frontend/widgets/HFRPptSource.hpp |  19 ++-
+ frontend/widgets/HFRPresenter.cpp | 233 ++++++++++++++++++++++++++++++
+ frontend/widgets/HFRPresenter.hpp |  49 +++++++
+ 9 files changed, 498 insertions(+), 4 deletions(-)
+ create mode 100644 frontend/widgets/HFRPresenter.cpp
+ create mode 100644 frontend/widgets/HFRPresenter.hpp
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index c67ad53..0b146dc 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -63,6 +63,8 @@ target_sources(
+     widgets/HFRPpt.hpp
+     widgets/HFRPptSource.cpp
+     widgets/HFRPptSource.hpp
++    widgets/HFRPresenter.cpp
++    widgets/HFRPresenter.hpp
+     widgets/StatusBarWidget.cpp
+     widgets/StatusBarWidget.hpp
+ )
+@@ -111,4 +113,4 @@ if(HFR_EMBED_LO)
+   else()
+     message(STATUS "HuafeiRongOBS: HFR_EMBED_LO=ON but runtime not found at ${HFR_LO_RUNTIME_DIR} (skip embedding)")
+   endif()
+-endif()
++endif()
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index cf3e432..5bec09a 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include <obs-frontend-api.h>
+ 
++#include "HFRPresenter.hpp"
+ #include "HFRPpt.hpp"
+ 
+ #include <vector>
+@@ -263,13 +264,62 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	btnTest = new QPushButton(QStringLiteral("填充测试色"), panel);
+ 	btnSafeArea = new QPushButton(QStringLiteral("安全区"), panel);
+ 	btnProject = new QPushButton(QStringLiteral("▶投影选中屏"), panel);
++	btnStopOne = new QPushButton(QStringLiteral("■停本画布"), panel);
+ 	btnStopAll = new QPushButton(QStringLiteral("■全部关闭"), panel);
+ 	actRow->addWidget(btnTest);
+ 	actRow->addWidget(btnSafeArea);
+ 	actRow->addWidget(btnProject);
++	actRow->addWidget(btnStopOne);
+ 	actRow->addWidget(btnStopAll);
+ 	layout->addLayout(actRow);
+ 
++	QHBoxLayout *pptRow = new QHBoxLayout();
++	btnPptOpen = new QPushButton(QStringLiteral("打开PPT"), panel);
++	btnPptPrev = new QPushButton(QStringLiteral("PPT上一页"), panel);
++	btnPptNext = new QPushButton(QStringLiteral("PPT下一页"), panel);
++	btnPresenter = new QPushButton(QStringLiteral("讲者视图"), panel);
++	pptRow->addWidget(btnPptOpen);
++	pptRow->addWidget(btnPptPrev);
++	pptRow->addWidget(btnPptNext);
++	pptRow->addWidget(btnPresenter);
++	layout->addLayout(pptRow);
++
++	QHBoxLayout *liveRow = new QHBoxLayout();
++	btnStreamStart = new QPushButton(QStringLiteral("●推流该画布"), panel);
++	btnStreamStop = new QPushButton(QStringLiteral("■停推流"), panel);
++	btnStreamStopAll = new QPushButton(QStringLiteral("■全部停推流"), panel);
++	liveRow->addWidget(btnStreamStart);
++	liveRow->addWidget(btnStreamStop);
++	liveRow->addWidget(btnStreamStopAll);
++	layout->addLayout(liveRow);
++
++	QHBoxLayout *outRow = new QHBoxLayout();
++	encCombo = new QComboBox(panel);
++	{
++		const char *id = nullptr;
++		for (size_t i = 0; obs_enum_encoder_types(i, &id); i++) {
++			if (!id) {
++				continue;
++			}
++			const QString sid = QString::fromUtf8(id);
++			if (sid.contains(QStringLiteral("264")) || sid == QStringLiteral("jim_nvenc")) {
++				encCombo->addItem(sid, sid);
++			}
++		}
++		const int def = encCombo->findData(QStringLiteral("obs_x264"));
++		if (def >= 0) {
++			encCombo->setCurrentIndex(def);
++		}
++	}
++	btnRecStart = new QPushButton(QStringLiteral("●录制该画布"), panel);
++	btnRecStop = new QPushButton(QStringLiteral("■停录制"), panel);
++	btnRecStopAll = new QPushButton(QStringLiteral("■全部停录"), panel);
++	outRow->addWidget(encCombo);
++	outRow->addWidget(btnRecStart);
++	outRow->addWidget(btnRecStop);
++	outRow->addWidget(btnRecStopAll);
++	layout->addLayout(outRow);
++
+ 	status = new QLabel(QStringLiteral("就绪"), panel);
+ 	status->setWordWrap(true);
+ 	status->setMaximumHeight(60);
+@@ -298,6 +348,7 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnPptOpen, &QPushButton::clicked, this, [this]() { PptOpenTest(); });
+ 	connect(btnPptPrev, &QPushButton::clicked, this, [this]() { PptPrev(); });
+ 	connect(btnPptNext, &QPushButton::clicked, this, [this]() { PptNext(); });
++	connect(btnPresenter, &QPushButton::clicked, this, []() { HfrOpenPresenterWindow(); });
+ 	connect(btnStreamStart, &QPushButton::clicked, this, [this]() { StartStreamingSelected(); });
+ 	connect(btnStreamStop, &QPushButton::clicked, this, [this]() { StopStreamingSelected(); });
+ 	connect(btnStreamStopAll, &QPushButton::clicked, this, [this]() {
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 39e3280..607402d 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -130,6 +130,7 @@ private:
+ 	QPushButton *btnPptOpen = nullptr;
+ 	QPushButton *btnPptPrev = nullptr;
+ 	QPushButton *btnPptNext = nullptr;
++	QPushButton *btnPresenter = nullptr;
+ 	QComboBox *encCombo = nullptr;
+ 	QPushButton *btnStreamStart = nullptr;
+ 	QPushButton *btnStreamStop = nullptr;
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+index 0614a30..9d583b1 100644
+--- a/frontend/widgets/HFRPpt.cpp
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -178,6 +178,72 @@ bool HFRPptDocument::RenderCurrentPart(uint32_t w, uint32_t h, std::vector<uint8
+ 	return true;
+ }
+ 
++bool HFRPptDocument::RenderPart(int index, uint32_t w, uint32_t h, std::vector<uint8_t> &bgraOut, QString *errOut)
++{
++	if (!doc) {
++		if (errOut) {
++			*errOut = QStringLiteral("尚未打开 PPT");
++		}
++		return false;
++	}
++	const int saved = CurrentPart();
++	if (index < 0 || index >= partCount) {
++		return false;
++	}
++	if (!SetPart(index)) {
++		return false;
++	}
++	const bool ok = RenderCurrentPart(w, h, bgraOut, errOut);
++	if (saved >= 0) {
++		SetPart(saved);
++	}
++	return ok;
++}
++
++QString HFRPptDocument::NotesText() const
++{
++	if (!doc) {
++		return QString();
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	if (!d->pClass->getCommandValues) {
++		return QString();
++	}
++	/* 尽力尝试几个常见命令；不同版本支持情况不同，取不到就返回空串 */
++	const char *cmds[] = {".uno:PresentationNotes", ".uno:SlideNotes", ".uno:Notes"};
++	for (const char *cmd : cmds) {
++		char *v = d->pClass->getCommandValues(d, cmd);
++		if (!v) {
++			continue;
++		}
++		QString s = QString::fromUtf8(v);
++		/* LOK 返回 JSON 或纯文本；如果像 JSON 就粗略抽取 "text" 字段 */
++		if (s.startsWith(QLatin1Char('{')) || s.startsWith(QLatin1Char('['))) {
++			const int k = s.indexOf(QStringLiteral("\"text\""));
++			if (k >= 0) {
++				const int c1 = s.indexOf(QLatin1Char(':'), k);
++				const int q1 = s.indexOf(QLatin1Char('"'), c1 + 1);
++				const int q2 = s.indexOf(QLatin1Char('"'), q1 + 1);
++				if (q1 > 0 && q2 > q1) {
++					s = s.mid(q1 + 1, q2 - q1 - 1);
++				}
++			} else {
++				s.clear();
++			}
++		}
++		/* 释放 LOK 返回的字符串：freeError 定义在 Kit 类上 */
++		if (LibreOfficeKit *k = (LibreOfficeKit *)HFRPpt::Instance().Kit()) {
++			if (k->pClass && k->pClass->freeError) {
++				k->pClass->freeError(v);
++			}
++		}
++		if (!s.trimmed().isEmpty()) {
++			return s;
++		}
++	}
++	return QString();
++}
++
+ #else /* !HFR_ENABLE_PPT */
+ 
+ HFRPptDocument::~HFRPptDocument() {}
+@@ -212,6 +278,17 @@ bool HFRPptDocument::RenderCurrentPart(uint32_t, uint32_t, std::vector<uint8_t>
+ 	}
+ 	return false;
+ }
++bool HFRPptDocument::RenderPart(int, uint32_t, uint32_t, std::vector<uint8_t> &, QString *errOut)
++{
++	if (errOut) {
++		*errOut = QStringLiteral("本构建未启用 PPT（-DHFR_ENABLE_PPT=ON）");
++	}
++	return false;
++}
++QString HFRPptDocument::NotesText() const
++{
++	return QString();
++}
+ 
+ #endif
+ 
+diff --git a/frontend/widgets/HFRPpt.hpp b/frontend/widgets/HFRPpt.hpp
+index 1a62653..c68ded1 100644
+--- a/frontend/widgets/HFRPpt.hpp
++++ b/frontend/widgets/HFRPpt.hpp
+@@ -45,6 +45,12 @@ public:
+ 	/* 整页渲染为 BGRA（自顶向下，每像素 4 字节） */
+ 	bool RenderCurrentPart(uint32_t w, uint32_t h, std::vector<uint8_t> &bgraOut, QString *errOut);
+ 
++	/* 渲染指定页（内部临时切换再恢复）；用于讲者视图的"下一页预览" */
++	bool RenderPart(int index, uint32_t w, uint32_t h, std::vector<uint8_t> &bgraOut, QString *errOut);
++
++	/* 当前页备注文本（尽力从 LOK 取；取不到返回空串） */
++	QString NotesText() const;
++
+ private:
+ 	void *doc = nullptr;
+ 	int partCount = 0;
+@@ -74,6 +80,9 @@ public:
+ 
+ 	QString LastError() const { return lastError; }
+ 
++	/* 控制台自检用的内部文档实例（可能为空） */
++	HFRPptDocument *InnerDocument() const { return inner; }
++
+ private:
+ 	HFRPpt() = default;
+ 	~HFRPpt();
+diff --git a/frontend/widgets/HFRPptSource.cpp b/frontend/widgets/HFRPptSource.cpp
+index 6fc191f..6869f21 100644
+--- a/frontend/widgets/HFRPptSource.cpp
++++ b/frontend/widgets/HFRPptSource.cpp
+@@ -267,6 +267,55 @@ static void hfr_ppt_render(void *data, gs_effect_t *)
+ 
+ static struct obs_source_info hfr_ppt_source_info = {};
+ 
++HFRPptDocument *HfrPptSourceGetDoc(obs_source_t *source)
++{
++	if (!source) {
++		return nullptr;
++	}
++	const char *id = obs_source_get_id(source);
++	if (!id || strcmp(id, "hfr_ppt_source") != 0) {
++		return nullptr;
++	}
++	HfrPptCtx *ctx = static_cast<HfrPptCtx *>(obs_obj_get_data(source));
++	return ctx ? &ctx->doc : nullptr;
++}
++
++void HfrPptSourceMarkDirty(obs_source_t *source)
++{
++	if (!source) {
++		return;
++	}
++	const char *id = obs_source_get_id(source);
++	if (!id || strcmp(id, "hfr_ppt_source") != 0) {
++		return;
++	}
++	HfrPptCtx *ctx = static_cast<HfrPptCtx *>(obs_obj_get_data(source));
++	if (ctx) {
++		ctx->needCpuRender = true;
++		ctx->needUpload = true;
++	}
++}
++
++static bool hfr_find_ppt_cb(void *param, obs_source_t *src)
++{
++	if (!param || !src) {
++		return true;
++	}
++	const char *id = obs_source_get_id(src);
++	if (id && strcmp(id, "hfr_ppt_source") == 0) {
++		*static_cast<obs_source_t **>(param) = src;
++		return false;
++	}
++	return true;
++}
++
++obs_source_t *HfrFindFirstPptSource()
++{
++	obs_source_t *found = nullptr;
++	obs_enum_sources(hfr_find_ppt_cb, &found);
++	return found;
++}
++
+ bool HfrRegisterPptSource()
+ {
+ 	static bool registered = false;
+@@ -296,6 +345,16 @@ bool HfrRegisterPptSource()
+ 
+ #else /* !HFR_ENABLE_PPT */
+ 
++HFRPptDocument *HfrPptSourceGetDoc(obs_source_t *)
++{
++	return nullptr;
++}
++void HfrPptSourceMarkDirty(obs_source_t *) {}
++obs_source_t *HfrFindFirstPptSource()
++{
++	return nullptr;
++}
++
+ bool HfrRegisterPptSource()
+ {
+ 	/* 未启用时不注册（避免出现无法工作的来源项） */
+diff --git a/frontend/widgets/HFRPptSource.hpp b/frontend/widgets/HFRPptSource.hpp
+index 11761f7..04bdccf 100644
+--- a/frontend/widgets/HFRPptSource.hpp
++++ b/frontend/widgets/HFRPptSource.hpp
+@@ -1,6 +1,19 @@
+ #pragma once
+ 
+-/* PPT 来源类型注册入口。
+- * 声明统一放在 HFRPpt.hpp（跨文件调用点都从那里引用），这里仅做转发包含，
+- * 便于调用方只 include 一个头就能拿到声明。 */
++/* PPT 来源类型注册入口与访问器。
++ * 声明统一放在 HFRPpt.hpp（跨文件调用点都从那里引用），这里做转发包含，
++ * 并额外提供"取来源内部文档/标记重绘"的访问器，供讲者视图同步使用。 */
+ #include "HFRPpt.hpp"
++
++#include <obs.hpp>
++
++class HFRPptDocument;
++
++/* 取某个 PPT 来源内部使用的文档实例；非本类型来源返回 nullptr */
++HFRPptDocument *HfrPptSourceGetDoc(obs_source_t *source);
++
++/* 让该来源在下一帧重新渲染（页面变化后调用，画布/推流随即可见） */
++void HfrPptSourceMarkDirty(obs_source_t *source);
++
++/* 找到第一个 PPT 来源（不增加引用，仅用于临时使用）；无则 nullptr */
++obs_source_t *HfrFindFirstPptSource();
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRPresenter.cpp b/frontend/widgets/HFRPresenter.cpp
+new file mode 100644
+index 0000000..18e46ec
+--- /dev/null
++++ b/frontend/widgets/HFRPresenter.cpp
+@@ -0,0 +1,233 @@
++#include "HFRPresenter.hpp"
++
++#include "HFRPpt.hpp"
++#include "HFRPptSource.hpp"
++
++#include <QApplication>
++#include <QCheckBox>
++#include <QCloseEvent>
++#include <QHBoxLayout>
++#include <QImage>
++#include <QKeyEvent>
++#include <QLabel>
++#include <QPixmap>
++#include <QPushButton>
++#include <QTextEdit>
++#include <QVBoxLayout>
++
++#include <obs-module.h>
++
++static HfrPresenterWindow *g_presenter = nullptr;
++
++HfrPresenterWindow::HfrPresenterWindow(QWidget *parent) : QWidget(parent)
++{
++	setWindowTitle(QStringLiteral("讲者视图（备注 / 下一页）"));
++	setAttribute(Qt::WA_DeleteOnClose, false);
++	resize(1100, 620);
++
++	QHBoxLayout *root = new QHBoxLayout(this);
++
++	curView = new QLabel(this);
++	curView->setMinimumSize(560, 315);
++	curView->setStyleSheet(QStringLiteral("background:#111;color:#888;"));
++	curView->setAlignment(Qt::AlignCenter);
++	curView->setText(QStringLiteral("当前页"));
++	root->addWidget(curView, 3);
++
++	QVBoxLayout *right = new QVBoxLayout();
++	nextView = new QLabel(this);
++	nextView->setMinimumSize(300, 169);
++	nextView->setStyleSheet(QStringLiteral("background:#111;color:#888;"));
++	nextView->setAlignment(Qt::AlignCenter);
++	nextView->setText(QStringLiteral("下一页"));
++	right->addWidget(nextView, 1);
++
++	pageLabel = new QLabel(QStringLiteral("第 -/- 页"), this);
++	right->addWidget(pageLabel);
++
++	right->addWidget(new QLabel(QStringLiteral("备注："), this));
++	notesView = new QTextEdit(this);
++	notesView->setReadOnly(true);
++	notesView->setPlaceholderText(QStringLiteral("（该版本未从文档取到备注文本；后续将接入 UNO 备注读取）"));
++	right->addWidget(notesView, 3);
++
++	QHBoxLayout *btns = new QHBoxLayout();
++	btnPrev = new QPushButton(QStringLiteral("◀ 上一页"), this);
++	btnNext = new QPushButton(QStringLiteral("下一页 ▶"), this);
++	btns->addWidget(btnPrev);
++	btns->addWidget(btnNext);
++	right->addLayout(btns);
++
++	globalKeys = new QCheckBox(QStringLiteral("全局翻页（翻页笔/键盘，焦点不在本窗口也生效）"), this);
++	right->addWidget(globalKeys);
++
++	root->addLayout(right, 2);
++
++	connect(btnPrev, &QPushButton::clicked, this, [this]() { GotoPrev(); });
++	connect(btnNext, &QPushButton::clicked, this, [this]() { GotoNext(); });
++	connect(globalKeys, &QCheckBox::toggled, this, [this](bool on) {
++		if (on) {
++			qApp->installEventFilter(this);
++		} else {
++			qApp->removeEventFilter(this);
++		}
++	});
++
++	setFocusPolicy(Qt::StrongFocus);
++	UpdateImages();
++	UpdateNotes();
++}
++
++HfrPresenterWindow::~HfrPresenterWindow()
++{
++	if (globalKeys && globalKeys->isChecked()) {
++		qApp->removeEventFilter(this);
++	}
++	if (src) {
++		obs_source_release(src);
++		src = nullptr;
++	}
++	g_presenter = nullptr;
++}
++
++void HfrPresenterWindow::BindSource(obs_source_t *source)
++{
++	if (src) {
++		obs_source_release(src);
++		src = nullptr;
++	}
++	if (source) {
++		src = obs_source_get_ref(source);
++	}
++	RefreshAll();
++}
++
++HFRPptDocument *HfrPresenterWindow::Doc() const
++{
++	if (src) {
++		if (HFRPptDocument *d = HfrPptSourceGetDoc(src)) {
++			return d;
++		}
++	}
++	/* 兜底：控制台自检文档（若打开过） */
++	return HFRPpt::Instance().InnerDocument();
++}
++
++void HfrPresenterWindow::GotoNext()
++{
++	HFRPptDocument *d = Doc();
++	if (!d || !d->IsOpen()) {
++		return;
++	}
++	d->NextPart();
++	if (src) {
++		HfrPptSourceMarkDirty(src);
++	}
++	RefreshAll();
++}
++
++void HfrPresenterWindow::GotoPrev()
++{
++	HFRPptDocument *d = Doc();
++	if (!d || !d->IsOpen()) {
++		return;
++	}
++	d->PrevPart();
++	if (src) {
++		HfrPptSourceMarkDirty(src);
++	}
++	RefreshAll();
++}
++
++static QPixmap PixmapFromBgra(const std::vector<uint8_t> &buf, uint32_t w, uint32_t h)
++{
++	if (buf.empty() || w == 0 || h == 0) {
++		return QPixmap();
++	}
++	QImage img((const uchar *)buf.data(), (int)w, (int)h, (int)(w * 4), QImage::Format_ARGB32);
++	return QPixmap::fromImage(img.copy());
++}
++
++void HfrPresenterWindow::UpdateImages()
++{
++	HFRPptDocument *d = Doc();
++	if (!d || !d->IsOpen()) {
++		curView->setText(QStringLiteral("未绑定 PPT：请先在画布/场景里添加\"PPT 演示文稿\"来源"));
++		nextView->clear();
++		pageLabel->setText(QStringLiteral("第 -/- 页"));
++		return;
++	}
++	const int cur = d->CurrentPart();
++	const int total = d->PartCount();
++
++	std::vector<uint8_t> buf;
++	QString err;
++	if (d->RenderPart(cur, 960, 540, buf, &err)) {
++		curView->setPixmap(PixmapFromBgra(buf, 960, 540).scaled(curView->size(), Qt::KeepAspectRatio,
++									  Qt::SmoothTransformation));
++	}
++	if (cur + 1 < total && d->RenderPart(cur + 1, 480, 270, buf, &err)) {
++		nextView->setPixmap(PixmapFromBgra(buf, 480, 270).scaled(nextView->size(), Qt::KeepAspectRatio,
++									  Qt::SmoothTransformation));
++	} else {
++		nextView->setText(QStringLiteral("（已是最后一页）"));
++	}
++	pageLabel->setText(QStringLiteral("第 %1 / %2 页").arg(cur + 1).arg(total));
++}
++
++void HfrPresenterWindow::UpdateNotes()
++{
++	HFRPptDocument *d = Doc();
++	const QString notes = (d && d->IsOpen()) ? d->NotesText() : QString();
++	notesView->setPlainText(notes);
++}
++
++void HfrPresenterWindow::RefreshAll()
++{
++	UpdateImages();
++	UpdateNotes();
++}
++
++bool HfrPresenterWindow::eventFilter(QObject *watched, QEvent *event)
++{
++	if (event->type() == QEvent::KeyPress) {
++		QKeyEvent *ke = static_cast<QKeyEvent *>(event);
++		switch (ke->key()) {
++		case Qt::Key_PageDown:
++		case Qt::Key_Right:
++		case Qt::Key_Space:
++		case Qt::Key_Down:
++			GotoNext();
++			return true;
++		case Qt::Key_PageUp:
++		case Qt::Key_Left:
++		case Qt::Key_Up:
++			GotoPrev();
++			return true;
++		default:
++			break;
++		}
++	}
++	return QWidget::eventFilter(watched, event);
++}
++
++void HfrPresenterWindow::closeEvent(QCloseEvent *event)
++{
++	Q_UNUSED(event);
++	/* 窗口常驻：关闭仅隐藏，避免反复重建 */
++	hide();
++}
++
++void HfrOpenPresenterWindow()
++{
++	if (!g_presenter) {
++		g_presenter = new HfrPresenterWindow();
++	}
++	obs_source_t *src = HfrFindFirstPptSource();
++	if (src) {
++		g_presenter->BindSource(src);
++	}
++	g_presenter->show();
++	g_presenter->raise();
++	g_presenter->activateWindow();
++}
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRPresenter.hpp b/frontend/widgets/HFRPresenter.hpp
+new file mode 100644
+index 0000000..b0b53b3
+--- /dev/null
++++ b/frontend/widgets/HFRPresenter.hpp
+@@ -0,0 +1,49 @@
++#pragma once
++
++#include <QWidget>
++
++#include <obs.hpp>
++
++class QLabel;
++class QTextEdit;
++class QPushButton;
++class QCheckBox;
++class HFRPptDocument;
++
++/* 讲者视图窗口：
++ *   - 左：当前页大图；右：备注 + 下一页预览 + 页码
++ *   - 按钮与键盘（PageUp/PageDown/空格/左右键）翻页；可选"全局翻页"接管翻页笔
++ *   - 与画布上的 PPT 来源共享同一文档实例，翻页后来源会重绘，投影/推流同步更新
++ */
++class HfrPresenterWindow : public QWidget {
++public:
++	explicit HfrPresenterWindow(QWidget *parent = nullptr);
++	~HfrPresenterWindow() override;
++
++	/* 绑定到某个 PPT 来源（内部文档）；source 可为空（则只操作控制台自检文档） */
++	void BindSource(obs_source_t *source);
++	void RefreshAll();
++
++protected:
++	bool eventFilter(QObject *watched, QEvent *event) override;
++	void closeEvent(QCloseEvent *event) override;
++
++private:
++	HFRPptDocument *Doc() const;
++	void GotoNext();
++	void GotoPrev();
++	void UpdateImages();
++	void UpdateNotes();
++
++	obs_source_t *src = nullptr;   /* 已加引用 */
++	QLabel *curView = nullptr;
++	QLabel *nextView = nullptr;
++	QLabel *pageLabel = nullptr;
++	QTextEdit *notesView = nullptr;
++	QPushButton *btnPrev = nullptr;
++	QPushButton *btnNext = nullptr;
++	QCheckBox *globalKeys = nullptr;
++};
++
++/* 打开/前置讲者视图（全局单例窗口） */
++void HfrOpenPresenterWindow();
+\ No newline at end of file
+-- 
+2.55.0.windows.5
+

@@ -1,7 +1,7 @@
 From 492f799415c1778d618bfae2748547eeffb6ed6b Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 20:07:03 +0800
-Subject: [PATCH 16/28] =?UTF-8?q?fix(UI):=20robust=20canvas=20teardown=20?=
+Subject: [PATCH 16/29] =?UTF-8?q?fix(UI):=20robust=20canvas=20teardown=20?=
  =?UTF-8?q?=E2=80=94=20clear=20channel,=20remove=20canvas=20scenes,=20obs?=
  =?UTF-8?q?=5Fwait=5Ffor=5Fdestroy=5Fqueue=20before=20shutdown?=
 MIME-Version: 1.0

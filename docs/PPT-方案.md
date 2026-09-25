@@ -26,6 +26,13 @@
 - 渲染：`video_tick` 内 CPU 渲染整页 → `video_render` 内上传 `GS_BGRA` 纹理并 `obs_source_draw`，因此**投影/推流/每画布录制自动带上 PPT**（标准源管线）
 - 实现文件：`frontend/widgets/HFRPptSource.{hpp,cpp}`（配合 `HFRPpt.{hpp,cpp}` 的多实例文档）
 
+### 已实现（本轮）：讲者视图（Presenter View）
+- 控制台 PPT 行新增 **讲者视图** 按钮（`HFRPresenter.{hpp,cpp}`）
+- 窗口布局：左=**当前页大图**；右=**备注文本 + 下一页预览 + 页码**；按钮 上一页/下一页
+- 键盘：PageUp/PageDown、空格、左右/上下键；勾选 **"全局翻页（翻页笔/键盘）"** 后即使焦点不在该窗口也生效（适配无线翻页笔）
+- **同页同步**：讲者视图绑定画布上"PPT 演示文稿"来源的内部文档（`HfrFindFirstPptSource/HfrPptSourceGetDoc/HfrPptSourceMarkDirty`），翻页后来源立即重绘 → 投影/推流/录制同步更新
+- 备注：通过 LOK `getCommandValues` 尽力读取（`.uno:PresentationNotes/SlideNotes/Notes`）；取不到时窗口给出提示，后续接 UNO 备注读取
+
 ### 尚未做的（下一步）
 - 渲染结果 → **画布纹理**（投影/直播直接出画面）、**讲者视图**（备注 + 下一页）
 - **缺失字体报告与替换表**、2× 超采样、动画步骤预渲染（二期）
