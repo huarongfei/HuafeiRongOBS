@@ -1,0 +1,94 @@
+From cf94ee94476fb3fef52764d2f8c760abc58d05a1 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 19:32:46 +0800
+Subject: [PATCH 27/27] =?UTF-8?q?feat(ppt):=20attribution=20notice=20in=20?=
+ =?UTF-8?q?source=20properties=20=E2=80=94=20based=20on=20LibreOffice=20(L?=
+ =?UTF-8?q?OK),=20with=20detected=20version?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRPpt.cpp       | 24 ++++++++++++++++++++++++
+ frontend/widgets/HFRPpt.hpp       |  3 +++
+ frontend/widgets/HFRPptSource.cpp | 15 +++++++++++++++
+ 3 files changed, 42 insertions(+)
+
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+index 2f02bf1..bbddac1 100644
+--- a/frontend/widgets/HFRPpt.cpp
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -216,6 +216,30 @@ bool HFRPptDocument::RenderCurrentPart(uint32_t, uint32_t, std::vector<uint8_t>
+ 
+ /* ================================ HFRPpt ================================ */
+ 
++QString HfrLibreOfficeVersion()
++{
++#ifdef HFR_ENABLE_PPT
++	HFRPpt &ppt = HFRPpt::Instance();
++	if (!ppt.IsLoaded()) {
++		return QString();
++	}
++	LibreOfficeKit *k = (LibreOfficeKit *)ppt.Kit();
++	if (k && k->pClass && k->pClass->getVersionInfo) {
++		char *v = k->pClass->getVersionInfo(k);
++		if (v) {
++			const QString s = QString::fromUtf8(v);
++			if (k->pClass->freeError) {
++				k->pClass->freeError(v);
++			}
++			return s;
++		}
++	}
++	return QString();
++#else
++	return QString();
++#endif
++}
++
+ QString HfrPptTestOutputDir()
+ {
+ 	char *p = obs_frontend_get_current_profile_path();
+diff --git a/frontend/widgets/HFRPpt.hpp b/frontend/widgets/HFRPpt.hpp
+index d868918..1a62653 100644
+--- a/frontend/widgets/HFRPpt.hpp
++++ b/frontend/widgets/HFRPpt.hpp
+@@ -19,6 +19,9 @@
+  * 未启用 HFR_ENABLE_PPT 时也安全（不注册并返回 false）。 */
+ bool HfrRegisterPptSource();
+ 
++/* 检测到的 LibreOffice 版本（未加载时返回空串）；用于界面上的来源与授权声明 */
++QString HfrLibreOfficeVersion();
++
+ /* PPT 自检/预览输出目录（当前 profile 目录，取不到则系统临时目录） */
+ QString HfrPptTestOutputDir();
+ 
+diff --git a/frontend/widgets/HFRPptSource.cpp b/frontend/widgets/HFRPptSource.cpp
+index 10c64f7..6fc191f 100644
+--- a/frontend/widgets/HFRPptSource.cpp
++++ b/frontend/widgets/HFRPptSource.cpp
+@@ -179,6 +179,21 @@ static obs_properties_t *hfr_ppt_properties(void *data)
+ 	HfrPptCtx *ctx = static_cast<HfrPptCtx *>(data);
+ 	obs_properties_t *props = obs_properties_create();
+ 
++	/* —— 来源与授权声明（用户添加本来源、打开属性面板时可见）—— */
++	{
++		const QString ver = HfrLibreOfficeVersion();
++		QString attr = QStringLiteral(
++			"本功能基于 LibreOffice 开发：PPT 由 LibreOffice 的 LibreOfficeKit（LOK）在本进程内渲染，"
++			"不依赖 PowerPoint。LibreOffice 是 The Document Foundation 的商标，"
++			"按 MPL-2.0 / LGPLv3+ 授权发布。");
++		if (!ver.isEmpty()) {
++			attr += QStringLiteral(" 检测到的 LibreOffice 版本：%1。").arg(ver);
++		} else {
++			attr += QStringLiteral(" 当前尚未加载 LibreOffice（可用环境变量 HFR_LO_PATH 指定其安装目录）。");
++		}
++		obs_properties_add_text(props, "hfr_ppt_attribution", attr.toUtf8().constData(), OBS_TEXT_INFO);
++	}
++
+ 	obs_properties_add_path(props, "file", "PPT 文件", OBS_PATH_FILE,
+ 				"演示文稿 (*.pptx *.ppt *.odp)", nullptr);
+ 	obs_properties_add_int(props, "width", "渲染宽度", 160, 7680, 1);
+-- 
+2.55.0.windows.5
+

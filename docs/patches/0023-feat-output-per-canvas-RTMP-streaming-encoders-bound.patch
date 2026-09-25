@@ -1,7 +1,7 @@
 From 543b76cb9c9f99db8f8e3212eef57c074c33d81f Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 18:24:34 +0800
-Subject: [PATCH 23/26] =?UTF-8?q?feat(output):=20per-canvas=20RTMP=20strea?=
+Subject: [PATCH 23/27] =?UTF-8?q?feat(output):=20per-canvas=20RTMP=20strea?=
  =?UTF-8?q?ming=20=E2=80=94=20encoders=20bound=20to=20canvas=20video,=20se?=
  =?UTF-8?q?rvice=20cloned=20from=20current=20settings,=20LIVE=20indicator?=
  =?UTF-8?q?=20+=20stop-all?=

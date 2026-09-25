@@ -1,7 +1,7 @@
 From 5e1d5a24328a71a70d88d800b7c1dffd808013ed Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 18:07:59 +0800
-Subject: [PATCH 20/26] =?UTF-8?q?feat(output):=20per-canvas=20recording=20?=
+Subject: [PATCH 20/27] =?UTF-8?q?feat(output):=20per-canvas=20recording=20?=
  =?UTF-8?q?=E2=80=94=20x264+aac=20encoders=20bound=20to=20canvas=20video?=
  =?UTF-8?q?=5Ft,=20ffmpeg=5Fmuxer=20to=20mkv;=20stop-before-teardown?=
 MIME-Version: 1.0
