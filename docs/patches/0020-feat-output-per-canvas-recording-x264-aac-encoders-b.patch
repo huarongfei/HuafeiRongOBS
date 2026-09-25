@@ -1,0 +1,236 @@
+From 5e1d5a24328a71a70d88d800b7c1dffd808013ed Mon Sep 17 00:00:00 2001
+From: HuafeirongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 18:07:59 +0800
+Subject: [PATCH 20/20] =?UTF-8?q?feat(output):=20per-canvas=20recording=20?=
+ =?UTF-8?q?=E2=80=94=20x264+aac=20encoders=20bound=20to=20canvas=20video?=
+ =?UTF-8?q?=5Ft,=20ffmpeg=5Fmuxer=20to=20mkv;=20stop-before-teardown?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.cpp | 154 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRConsole.hpp |  13 +++
+ 2 files changed, 167 insertions(+)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index a23adab..0d5f2e1 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -11,7 +11,9 @@
+ #include <QScreen>
+ #include <QThread>
+ #include <QVBoxLayout>
++#include <QDateTime>
+ #include <QFile>
++#include <QFileInfo>
+ #include <QJsonArray>
+ #include <QJsonDocument>
+ #include <QJsonObject>
+@@ -269,6 +271,8 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(canvasList, &QListWidget::currentRowChanged, this, [this](int) { UpdateSceneListForSelection(); });
+ 	connect(btnProject, &QPushButton::clicked, this, [this]() { ProjectSelected(); });
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
++	connect(btnRecStart, &QPushButton::clicked, this, [this]() { StartRecordingSelected(); });
++	connect(btnRecStop, &QPushButton::clicked, this, [this]() { StopRecordingSelected(); });
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+ 	connect(canvasList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+ 		int row = canvasList->row(item);
+@@ -361,6 +365,7 @@ static void TeardownUserCanvas(obs_canvas_t *cv)
+ 
+ void HFRConsoleDock::CleanupForShutdown()
+ {
++	StopAllRecordings();
+ 	CloseAllProjectors();
+ 	for (obs_canvas_t *cv : canvases) {
+ 		TeardownUserCanvas(cv);
+@@ -628,6 +633,155 @@ void HFRConsoleDock::FillColorIntoSelectedScene()
+ 	HfrLog("color added into canvas scene");
+ }
+ 
++/* ---------------- 每画布独立录制（编码器绑定画布 video） ---------------- */
++
++void HFRConsoleDock::StartRecordingSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	if (cv == obs_get_main_canvas()) {
++		status->setText(QStringLiteral("主画布请用 OBS 自带录制按钮；这里录制用户画布"));
++		return;
++	}
++	if (recordings.contains(cv)) {
++		status->setText(QStringLiteral("该画布已在录制"));
++		return;
++	}
++
++	video_t *video = obs_canvas_get_video(cv);
++	if (!video) {
++		status->setText(QStringLiteral("该画布没有视频输出"));
++		return;
++	}
++
++	char *profilePath = obs_frontend_get_current_profile_path();
++	QString dir = profilePath ? QString::fromUtf8(profilePath) : QString();
++	if (profilePath) {
++		bfree(profilePath);
++	}
++	if (dir.isEmpty()) {
++		status->setText(QStringLiteral("取不到 profile 路径"));
++		return;
++	}
++	const QString canvasName = QString::fromUtf8(obs_canvas_get_name(cv));
++	const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
++	const QString file = dir + QStringLiteral("/hfr_") + canvasName + QStringLiteral("_") + ts + QStringLiteral(".mkv");
++
++	obs_data_t *vs = obs_data_create();
++	obs_data_set_string(vs, "rate_control", "CBR");
++	obs_data_set_int(vs, "bitrate", 6000);
++	obs_data_set_int(vs, "keyint_sec", 2);
++	obs_data_set_string(vs, "preset", "veryfast");
++	obs_data_set_string(vs, "profile", "high");
++	QString vname = canvasName + QStringLiteral(" · 视频");
++	obs_encoder_t *venc = obs_video_encoder_create("obs_x264", vname.toUtf8().constData(), vs, nullptr);
++	obs_data_release(vs);
++	if (!venc) {
++		status->setText(QStringLiteral("创建视频编码器失败（obs_x264 不可用？）"));
++		return;
++	}
++	obs_encoder_set_video(venc, video);
++
++	obs_data_t *as = obs_data_create();
++	obs_data_set_int(as, "bitrate", 160);
++	QString aname = canvasName + QStringLiteral(" · 音频");
++	obs_encoder_t *aenc = obs_audio_encoder_create("ffmpeg_aac", aname.toUtf8().constData(), as, 0, nullptr);
++	obs_data_release(as);
++	if (aenc) {
++		obs_encoder_set_audio(aenc, obs_get_audio());
++	}
++
++	obs_data_t *os = obs_data_create();
++	obs_data_set_string(os, "path", file.toUtf8().constData());
++	obs_data_t *fmt = obs_data_create();
++	obs_data_set_string(fmt, "extension", "mkv");
++	obs_data_set_obj(os, "format", fmt);
++	obs_data_release(fmt);
++
++	QString oname = canvasName + QStringLiteral(" · 录制");
++	obs_output_t *out = obs_output_create("ffmpeg_muxer", oname.toUtf8().constData(), os, nullptr);
++	obs_data_release(os);
++	if (!out) {
++		obs_encoder_release(venc);
++		if (aenc) {
++			obs_encoder_release(aenc);
++		}
++		status->setText(QStringLiteral("创建输出失败（ffmpeg_muxer 不可用？）"));
++		return;
++	}
++	obs_output_set_media(out, video, aenc ? obs_get_audio() : nullptr);
++	obs_output_set_video_encoder(out, venc);
++	if (aenc) {
++		obs_output_set_audio_encoder(out, aenc, 0);
++	}
++
++	if (!obs_output_start(out)) {
++		const char *err = obs_output_get_last_error(out);
++		status->setText(QStringLiteral("开始录制失败：%1").arg(err ? QString::fromUtf8(err) : QStringLiteral("未知")));
++		obs_output_release(out);
++		obs_encoder_release(venc);
++		if (aenc) {
++			obs_encoder_release(aenc);
++		}
++		return;
++	}
++
++	HfrRecording rec;
++	rec.out = out;
++	rec.venc = venc;
++	rec.aenc = aenc;
++	rec.path = file;
++	recordings.insert(cv, rec);
++	status->setText(QStringLiteral("录制中：%1 → %2").arg(canvasName).arg(QFileInfo(file).fileName()));
++	HfrLog("canvas recording started");
++}
++
++void HFRConsoleDock::StopRecordingSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv || !recordings.contains(cv)) {
++		status->setText(QStringLiteral("该画布没有在录制"));
++		return;
++	}
++	HfrRecording rec = recordings.take(cv);
++	const QString name = QFileInfo(rec.path).fileName();
++	if (rec.out) {
++		obs_output_stop(rec.out);
++		obs_output_release(rec.out);
++	}
++	if (rec.venc) {
++		obs_encoder_release(rec.venc);
++	}
++	if (rec.aenc) {
++		obs_encoder_release(rec.aenc);
++	}
++	status->setText(QStringLiteral("已停止录制：%1").arg(name));
++	HfrLog("canvas recording stopped");
++}
++
++void HFRConsoleDock::StopAllRecordings()
++{
++	const auto keys = recordings.keys();
++	for (obs_canvas_t *cv : keys) {
++		if (recordings.contains(cv)) {
++			HfrRecording rec = recordings.take(cv);
++			if (rec.out) {
++				obs_output_stop(rec.out);
++				obs_output_release(rec.out);
++			}
++			if (rec.venc) {
++				obs_encoder_release(rec.venc);
++			}
++			if (rec.aenc) {
++				obs_encoder_release(rec.aenc);
++			}
++		}
++	}
++}
++
+ /* ---------------- 持久化 ---------------- */
+ 
+ QString HFRConsoleDock::StateFilePath() const
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 6fc5c6e..30cef36 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -76,6 +76,9 @@ public:
+ 	void StopProjectionOfSelected();
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
++	void StartRecordingSelected();     /* 把选中画布录制到独立文件（编码器绑画布 video） */
++	void StopRecordingSelected();      /* 停止选中画布的录制 */
++	void StopAllRecordings();          /* 停止全部画布录制（退出/清理时用） */
+ 	void ToggleSafeAreaOnSelected(); /* 选中画布的投影：安全区网格开关 */
+ 	void UpdateSceneListForSelection(); /* 场景作用域：列出当前画布的场景 */
+ 	void CreateSceneForSelected();      /* 为当前画布新建场景 */
+@@ -101,6 +104,16 @@ private:
+ 	QPushButton *btnRename = nullptr;
+ 	QPushButton *btnTest = nullptr;
+ 	QPushButton *btnProject = nullptr;
++	struct HfrRecording {
++		obs_output_t *out = nullptr;
++		obs_encoder_t *venc = nullptr;
++		obs_encoder_t *aenc = nullptr;
++		QString path;
++	};
++	QHash<obs_canvas_t *, HfrRecording> recordings; /* 每画布一路录制 */
++
++	QPushButton *btnRecStart = nullptr;
++	QPushButton *btnRecStop = nullptr;
+ 	QPushButton *btnSceneNew = nullptr;
+ 	QPushButton *btnSceneUse = nullptr;
+ 	QPushButton *btnSceneDel = nullptr;
+-- 
+2.55.0.windows.5
+

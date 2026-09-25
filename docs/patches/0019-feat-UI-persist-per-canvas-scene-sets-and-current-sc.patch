@@ -1,7 +1,7 @@
 From 2d1b0a907f7b489b44679c169b54689f8ab3cb47 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 20:22:33 +0800
-Subject: [PATCH 19/19] feat(UI): persist per-canvas scene sets and current
+Subject: [PATCH 19/20] feat(UI): persist per-canvas scene sets and current
  scene (with test-color scene content rebuild)
 
 ---

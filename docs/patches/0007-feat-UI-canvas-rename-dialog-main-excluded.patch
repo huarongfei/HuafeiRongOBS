@@ -1,7 +1,7 @@
 From c76e0f10e8e60403157d08f7c319b8e9fbcb0fb8 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:51:48 +0800
-Subject: [PATCH 07/19] feat(UI): canvas rename dialog (main excluded)
+Subject: [PATCH 07/20] feat(UI): canvas rename dialog (main excluded)
 
 ---
  frontend/widgets/HFRConsole.cpp | 30 ++++++++++++++++++++++++++++++

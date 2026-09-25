@@ -1,7 +1,7 @@
 From da86950d7048c38baaefabd09a0a718ca4820528 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 07:12:27 +0800
-Subject: [PATCH 12/19] feat(UI): double-click canvas row projects to primary
+Subject: [PATCH 12/20] feat(UI): double-click canvas row projects to primary
  screen
 
 ---
