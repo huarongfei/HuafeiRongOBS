@@ -1,0 +1,87 @@
+From e2fce005678f05b6be6961e24a4c5cb30e152866 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 20:00:24 +0800
+Subject: [PATCH 30/30] =?UTF-8?q?fix(ppt):=20harden=20LOK=20loader=20?=
+ =?UTF-8?q?=E2=80=94=20AddDllDirectory+user-dirs,=20altered=20search=20pat?=
+ =?UTF-8?q?h,=20plain=20fallback;=20log=20resolved=20path=20and=20per-stra?=
+ =?UTF-8?q?tegy=20error=20codes?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRPpt.cpp | 49 ++++++++++++++++++++++++++++++++++---
+ 1 file changed, 46 insertions(+), 3 deletions(-)
+
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+index 9d583b1..bdab988 100644
+--- a/frontend/widgets/HFRPpt.cpp
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -388,10 +388,51 @@ bool HFRPpt::EnsureLoaded(QString *errOut)
+ 		}
+ 		return false;
+ 	}
++	const QString programDir = QDir::toNativeSeparators(loPath + QStringLiteral("/program"));
+ 	const std::wstring wdll = QDir::toNativeSeparators(dllPath).toStdWString();
+-	HMODULE h = LoadLibraryW(wdll.c_str());
++	const std::wstring wprogram = programDir.toStdWString();
++	const std::wstring wlo = QDir::toNativeSeparators(loPath).toStdWString();
++
++	/* 记录诊断信息，便于定位"依赖加载失败" */
++	blog(LOG_INFO, "[HFR-PPT] LO 路径=%s；program=%s；mergedlo 存在=%d", loPath.toUtf8().constData(),
++	     programDir.toUtf8().constData(), (int)QFile::exists(dllPath));
++
++	/* 依赖搜索路径加固：先临时切换工作目录 + 指定 DLL 目录 + 替代搜索路径加载 */
++	wchar_t prevDir[MAX_PATH] = {0};
++	GetCurrentDirectoryW(MAX_PATH, prevDir);
++	SetCurrentDirectoryW(wlo.c_str());
++	SetDllDirectoryW(wprogram.c_str());
++
++	/* OBS 进程可能启用了受限默认搜索目录（SetDefaultDllDirectories），
++	 * 因此把 lo\program 注册为用户目录，并组合 DEFAULT_DIRS|USER_DIRS 加载 */
++	DLL_DIRECTORY_COOKIE cookie = AddDllDirectory(wprogram.c_str());
++
++	HMODULE h = LoadLibraryExW(wdll.c_str(), nullptr,
++				   LOAD_LIBRARY_SEARCH_DEFAULT_DIRS | LOAD_LIBRARY_SEARCH_USER_DIRS);
++	DWORD err0 = h ? 0 : GetLastError();
+ 	if (!h) {
+-		lastError = QStringLiteral("加载 mergedlo.dll 失败（%1）").arg(GetLastError());
++		h = LoadLibraryExW(wdll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
++	}
++	DWORD err1 = h ? 0 : GetLastError();
++	if (!h) {
++		h = LoadLibraryW(wdll.c_str());
++	}
++	if (!h) {
++		blog(LOG_WARNING,
++		     "[HFR-PPT] 三种加载方式均失败：user_dirs(err=%lu) altered(err=%lu) plain(err=%lu)",
++		     (unsigned long)err0, (unsigned long)err1, (unsigned long)GetLastError());
++	} else {
++		blog(LOG_INFO, "[HFR-PPT] mergedlo.dll 加载成功（cookie=%p）", (void *)cookie);
++	}
++	if (prevDir[0]) {
++		SetCurrentDirectoryW(prevDir);
++	}
++	if (!h) {
++		lastError = QStringLiteral("加载 mergedlo.dll 失败（错误码 %1）：%2。请确认程序目录下 lo\\program 完整，"
++					   "或运行 scripts/fetch-libreoffice-runtime.cmd 重新获取运行时。")
++				    .arg((unsigned long)GetLastError())
++				    .arg(dllPath);
++		blog(LOG_WARNING, "[HFR-PPT] %s", lastError.toUtf8().constData());
+ 		if (errOut) {
+ 			*errOut = lastError;
+ 		}
+@@ -416,7 +457,9 @@ bool HFRPpt::EnsureLoaded(QString *errOut)
+ 	const int ret = preinit(installUrl.toUtf8().constData(), profileUrl.toUtf8().constData(), &k);
+ 	if (ret != 0 || !k) {
+ 		FreeLibrary(h);
+-		lastError = QStringLiteral("lok_preinit_2 失败（ret=%1）").arg(ret);
++		blog(LOG_WARNING, "[HFR-PPT] lok_preinit_2 返回 %d（install=%s, profile=%s）", ret,
++		     installUrl.toUtf8().constData(), profileUrl.toUtf8().constData());
++		lastError = QStringLiteral("lok_preinit_2 失败（ret=%1，install=%2）").arg(ret).arg(installUrl);
+ 		if (errOut) {
+ 			*errOut = lastError;
+ 		}
+-- 
+2.55.0.windows.5
+
