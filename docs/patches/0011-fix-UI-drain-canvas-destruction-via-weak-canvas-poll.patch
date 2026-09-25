@@ -1,7 +1,7 @@
 From 932cab8eff2c56d671f5c23a16a845cf5393ba47 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 07:06:51 +0800
-Subject: [PATCH 11/23] fix(UI): drain canvas destruction via weak-canvas poll
+Subject: [PATCH 11/24] fix(UI): drain canvas destruction via weak-canvas poll
  in CleanupForShutdown (shutdown race)
 
 ---

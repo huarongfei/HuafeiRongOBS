@@ -4,6 +4,10 @@ build_x64/
 logs/
 .deps/
 
+# 本地工具与安装包（不要入库）
+tools/
+*.msi
+
 # 常规
 *.user
 *.suo

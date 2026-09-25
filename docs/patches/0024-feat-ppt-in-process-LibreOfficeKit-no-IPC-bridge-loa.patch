@@ -1,0 +1,690 @@
+From 3ba951128c0e3a9a856bc84466d62f9a4195f972 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 19:07:04 +0800
+Subject: [PATCH 24/24] =?UTF-8?q?feat(ppt):=20in-process=20LibreOfficeKit?=
+ =?UTF-8?q?=20(no=20IPC=20bridge)=20=E2=80=94=20load=20mergedlo,=20lok=5Fp?=
+ =?UTF-8?q?reinit=5F2,=20documentLoad/paintTile/paging;=20console=20PPT=20?=
+ =?UTF-8?q?row=20+=20unattended=20autotest=20hook?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/cmake/ui-widgets.cmake |  22 ++
+ frontend/widgets/HFRConsole.cpp | 101 +++++++++
+ frontend/widgets/HFRConsole.hpp |   6 +
+ frontend/widgets/HFRPpt.cpp     | 391 ++++++++++++++++++++++++++++++++
+ frontend/widgets/HFRPpt.hpp     |  56 +++++
+ 5 files changed, 576 insertions(+)
+ create mode 100644 frontend/widgets/HFRPpt.cpp
+ create mode 100644 frontend/widgets/HFRPpt.hpp
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index 1927734..cf18518 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -59,6 +59,28 @@ target_sources(
+     widgets/OBSQTDisplay.hpp
+     widgets/HFRConsole.cpp
+     widgets/HFRConsole.hpp
++    widgets/HFRPpt.cpp
++    widgets/HFRPpt.hpp
+     widgets/StatusBarWidget.cpp
+     widgets/StatusBarWidget.hpp
+ )
++
++# ---------------------------------------------------------------------------
++# HuafeiRongOBS: 可选 PPT 支持（同进程 LibreOfficeKit，无 IPC 桥接）
++#   启用示例：
++#     cmake --preset windows-x64 -DENABLE_BROWSER=OFF -DHFR_ENABLE_PPT=ON \
++#           -DHFR_LO_SDK_DIR="D:/HuafeirongOBS/tools/LibreOfficeSDK/sdk/include"
++#   运行期需要 LibreOffice 解包目录（默认 D:/HuafeirongOBS/tools/LibreOffice，
++#   可用环境变量 HFR_LO_PATH 覆盖）。
++# ---------------------------------------------------------------------------
++option(HFR_ENABLE_PPT "Enable LibreOfficeKit-based PPT rendering (in-process)" OFF)
++set(HFR_LO_SDK_DIR "D:/HuafeirongOBS/tools/LibreOfficeSDK/sdk/include" CACHE PATH "LibreOfficeKit SDK include dir")
++
++if(HFR_ENABLE_PPT)
++  if(NOT EXISTS "${HFR_LO_SDK_DIR}/LibreOfficeKit/LibreOfficeKit.h")
++    message(FATAL_ERROR "HFR_ENABLE_PPT=ON but LibreOfficeKit.h not found under ${HFR_LO_SDK_DIR}")
++  endif()
++  target_include_directories(obs-studio PRIVATE "${HFR_LO_SDK_DIR}")
++  target_compile_definitions(obs-studio PRIVATE HFR_ENABLE_PPT)
++  message(STATUS "HuafeiRongOBS: PPT(LOK) enabled, SDK=${HFR_LO_SDK_DIR}")
++endif()
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 9dc8268..67c51a1 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -12,22 +12,30 @@
+ #include <QThread>
+ #include <QVBoxLayout>
+ #include <QComboBox>
++#include <QDir>
++#include <QFileDialog>
+ #include <QDateTime>
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QJsonArray>
+ #include <QJsonDocument>
+ #include <QJsonObject>
++#include <QTimer>
+ #include <QVariant>
+ 
+ #include <obs-frontend-api.h>
+ 
++#include "HFRPpt.hpp"
++
+ #include <vector>
+ 
+ #include <obs-module.h>
+ 
+ HFRConsoleDock *HFRConsoleDock::s_instance = nullptr;
+ 
++/* 前置声明：定义在文件下部（PPT 段），构造函数里的自检钩子会用到 */
++static QString PptTestOutputDir();
++
+ static void HfrLog(const char *msg)
+ {
+ 	blog(LOG_INFO, "[HFR] %s", msg);
+@@ -288,6 +296,9 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnRecStart, &QPushButton::clicked, this, [this]() { StartRecordingSelected(); });
+ 	connect(btnRecStop, &QPushButton::clicked, this, [this]() { StopRecordingSelected(); });
++	connect(btnPptOpen, &QPushButton::clicked, this, [this]() { PptOpenTest(); });
++	connect(btnPptPrev, &QPushButton::clicked, this, [this]() { PptPrev(); });
++	connect(btnPptNext, &QPushButton::clicked, this, [this]() { PptNext(); });
+ 	connect(btnStreamStart, &QPushButton::clicked, this, [this]() { StartStreamingSelected(); });
+ 	connect(btnStreamStop, &QPushButton::clicked, this, [this]() { StopStreamingSelected(); });
+ 	connect(btnStreamStopAll, &QPushButton::clicked, this, [this]() {
+@@ -324,6 +335,26 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 
+ 	LoadState();
+ 	UpdateSceneListForSelection();
++
++	/* 无人值守自检：设置 HFR_PPT_AUTOTEST=<pptx 路径> 后启动即渲染一次并写日志 */
++	if (qEnvironmentVariableIsSet("HFR_PPT_AUTOTEST")) {
++		const QString pptPath = qEnvironmentVariable("HFR_PPT_AUTOTEST");
++		QTimer::singleShot(5000, [pptPath]() {
++			QString err, stats;
++			HFRPpt &ppt = HFRPpt::Instance();
++			blog(LOG_INFO, "[HFR-PPT] autotest: open %s", pptPath.toUtf8().constData());
++			if (!ppt.OpenDocument(pptPath, &err)) {
++				blog(LOG_WARNING, "[HFR-PPT] autotest open failed: %s", err.toUtf8().constData());
++				return;
++			}
++			const QString out = PptTestOutputDir() + QStringLiteral("/hfr_ppt_autotest.bmp");
++			if (ppt.RenderToBmpForTest(1280, 720, out, &stats, &err)) {
++				blog(LOG_INFO, "[HFR-PPT] autotest OK: %s -> %s", stats.toUtf8().constData(), out.toUtf8().constData());
++			} else {
++				blog(LOG_WARNING, "[HFR-PPT] autotest render failed: %s", err.toUtf8().constData());
++			}
++		});
++	}
+ }
+ 
+ HFRConsoleDock::~HFRConsoleDock()
+@@ -1004,6 +1035,76 @@ void HFRConsoleDock::StopAllStreams()
+ 	}
+ }
+ 
++/* ---------------- PPT（同进程 LibreOfficeKit，无 IPC 桥接） ---------------- */
++
++static QString PptTestOutputDir()
++{
++	char *p = obs_frontend_get_current_profile_path();
++	QString dir = p ? QString::fromUtf8(p) : QString();
++	if (p) {
++		bfree(p);
++	}
++	if (dir.isEmpty()) {
++		dir = QDir::tempPath();
++	}
++	QDir().mkpath(dir);
++	return dir;
++}
++
++static void PptRenderAndReport(QLabel *status)
++{
++	HFRPpt &ppt = HFRPpt::Instance();
++	if (!ppt.IsOpen()) {
++		status->setText(QStringLiteral("PPT：尚未打开文件"));
++		return;
++	}
++	const QString out = PptTestOutputDir() + QStringLiteral("/hfr_ppt_preview.bmp");
++	QString stats, err;
++	if (ppt.RenderToBmpForTest(1280, 720, out, &stats, &err)) {
++		status->setText(QStringLiteral("PPT 渲染成功：%1 → %2").arg(stats).arg(out));
++	} else {
++		status->setText(QStringLiteral("PPT 渲染失败：%1").arg(err));
++	}
++}
++
++void HFRConsoleDock::PptOpenTest()
++{
++	const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("选择 PPT 文件"), QString(),
++							  QStringLiteral("演示文稿 (*.pptx *.ppt *.odp);;所有文件 (*)"));
++	if (file.isEmpty()) {
++		return;
++	}
++	QString err;
++	HFRPpt &ppt = HFRPpt::Instance();
++	if (!ppt.OpenDocument(file, &err)) {
++		status->setText(QStringLiteral("PPT 打开失败：%1").arg(err));
++		return;
++	}
++	PptRenderAndReport(status);
++}
++
++void HFRConsoleDock::PptNext()
++{
++	HFRPpt &ppt = HFRPpt::Instance();
++	if (!ppt.IsOpen()) {
++		status->setText(QStringLiteral("PPT：尚未打开文件"));
++		return;
++	}
++	ppt.NextPart();
++	PptRenderAndReport(status);
++}
++
++void HFRConsoleDock::PptPrev()
++{
++	HFRPpt &ppt = HFRPpt::Instance();
++	if (!ppt.IsOpen()) {
++		status->setText(QStringLiteral("PPT：尚未打开文件"));
++		return;
++	}
++	ppt.PrevPart();
++	PptRenderAndReport(status);
++}
++
+ /* ---------------- 持久化 ---------------- */
+ 
+ QString HFRConsoleDock::StateFilePath() const
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 127ec9b..39e3280 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -83,6 +83,9 @@ public:
+ 	void StartRecordingSelected();     /* 把选中画布录制到独立文件（编码器绑画布 video） */
+ 	void StopRecordingSelected();      /* 停止选中画布的录制 */
+ 	void StopAllRecordings();          /* 停止全部画布录制（退出/清理时用） */
++	void PptOpenTest();               /* PPT：选择 pptx，用 LOK 渲染验证（BMP + 统计） */
++	void PptNext();                    /* PPT：下一页 */
++	void PptPrev();                    /* PPT：上一页 */
+ 	void ToggleSafeAreaOnSelected(); /* 选中画布的投影：安全区网格开关 */
+ 	void UpdateSceneListForSelection(); /* 场景作用域：列出当前画布的场景 */
+ 	void CreateSceneForSelected();      /* 为当前画布新建场景 */
+@@ -124,6 +127,9 @@ private:
+ 	};
+ 	QHash<obs_canvas_t *, HfrStream> streams; /* 每画布一路推流 */
+ 
++	QPushButton *btnPptOpen = nullptr;
++	QPushButton *btnPptPrev = nullptr;
++	QPushButton *btnPptNext = nullptr;
+ 	QComboBox *encCombo = nullptr;
+ 	QPushButton *btnStreamStart = nullptr;
+ 	QPushButton *btnStreamStop = nullptr;
+diff --git a/frontend/widgets/HFRPpt.cpp b/frontend/widgets/HFRPpt.cpp
+new file mode 100644
+index 0000000..f3d8951
+--- /dev/null
++++ b/frontend/widgets/HFRPpt.cpp
+@@ -0,0 +1,391 @@
++#include "HFRPpt.hpp"
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QUrl>
++
++#include <obs-module.h>
++
++#ifdef HFR_ENABLE_PPT
++/* LOK 的 paintTile/getParts/postUnoCommand 等成员受此宏保护 */
++#define LOK_USE_UNSTABLE_API 1
++#include <LibreOfficeKit/LibreOfficeKit.h>
++#include <LibreOfficeKit/LibreOfficeKitEnums.h>
++#include <windows.h>
++
++typedef int (*LokHookPreInit2)(const char *install_path, const char *user_profile_url, LibreOfficeKit **kit);
++#endif
++
++HFRPpt &HFRPpt::Instance()
++{
++	static HFRPpt inst;
++	return inst;
++}
++
++QString HFRPpt::DefaultLoPath()
++{
++	const QByteArray env = qgetenv("HFR_LO_PATH");
++	if (!env.isEmpty()) {
++		return QString::fromLocal8Bit(env);
++	}
++	return QStringLiteral("D:/HuafeirongOBS/tools/LibreOffice");
++}
++
++HFRPpt::~HFRPpt()
++{
++	CloseDocument();
++}
++
++bool HFRPpt::Enabled() const
++{
++#ifdef HFR_ENABLE_PPT
++	return true;
++#else
++	return false;
++#endif
++}
++
++#ifdef HFR_ENABLE_PPT
++
++static bool PathToFileUrl(const QString &path, QString *urlOut)
++{
++	if (path.isEmpty()) {
++		return false;
++	}
++	QString u = QUrl::fromLocalFile(path).toString();
++	if (!u.endsWith(QLatin1Char('/')) && QFileInfo(path).isDir()) {
++		u += QLatin1Char('/');
++	}
++	*urlOut = u;
++	return true;
++}
++
++bool HFRPpt::EnsureLoaded(QString *errOut)
++{
++	if (kit) {
++		return true;
++	}
++	const QString loPath = DefaultLoPath();
++	const QString dllPath = loPath + QStringLiteral("/program/mergedlo.dll");
++	if (!QFile::exists(dllPath)) {
++		lastError = QStringLiteral("未找到 LibreOffice：%1（可用环境变量 HFR_LO_PATH 指定安装根目录）").arg(dllPath);
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++
++	const std::wstring wdll = QDir::toNativeSeparators(dllPath).toStdWString();
++	HMODULE h = LoadLibraryW(wdll.c_str());
++	if (!h) {
++		lastError = QStringLiteral("加载 mergedlo.dll 失败（错误码 %1）").arg(GetLastError());
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++	LokHookPreInit2 preinit = (LokHookPreInit2)GetProcAddress(h, "lok_preinit_2");
++	if (!preinit) {
++		FreeLibrary(h);
++		lastError = QStringLiteral("mergedlo.dll 未导出 lok_preinit_2（该版本不支持 LOK？）");
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++
++	QString installUrl, profileUrl;
++	PathToFileUrl(loPath, &installUrl);
++	const QString profileDir = loPath + QStringLiteral("/hfr-lok-profile");
++	QDir().mkpath(profileDir);
++	PathToFileUrl(profileDir, &profileUrl);
++
++	LibreOfficeKit *k = nullptr;
++	const int ret = preinit(installUrl.toUtf8().constData(), profileUrl.toUtf8().constData(), &k);
++	if (ret != 0 || !k) {
++		FreeLibrary(h);
++		lastError = QStringLiteral("lok_preinit_2 失败（ret=%1）").arg(ret);
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++
++	libHandle = (void *)h;
++	kit = (void *)k;
++
++	/* 中文界面/字体回退相关的基础选项（后续可扩展为可配置） */
++	if (k->pClass && k->pClass->setOption) {
++		k->pClass->setOption(k, "locale", "zh-CN");
++	}
++	blog(LOG_INFO, "[HFR-PPT] LibreOffice LOK 已加载：%s", loPath.toUtf8().constData());
++	return true;
++}
++
++bool HFRPpt::OpenDocument(const QString &pptxPath, QString *errOut)
++{
++	if (!EnsureLoaded(errOut)) {
++		return false;
++	}
++	if (!QFile::exists(pptxPath)) {
++		lastError = QStringLiteral("文件不存在：%1").arg(pptxPath);
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++	CloseDocument();
++
++	QString url;
++	PathToFileUrl(pptxPath, &url);
++	LibreOfficeKit *k = (LibreOfficeKit *)kit;
++	LibreOfficeKitDocument *d = k->pClass->documentLoad(k, url.toUtf8().constData());
++	if (!d) {
++		const char *e = k->pClass->getError ? k->pClass->getError(k) : nullptr;
++		lastError = QStringLiteral("载入文档失败：%1").arg(e ? QString::fromUtf8(e) : QStringLiteral("未知"));
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++	doc = (void *)d;
++	openedPath = pptxPath;
++
++	if (d->pClass->initializeForRendering) {
++		d->pClass->initializeForRendering(d, nullptr);
++	}
++	partCount = d->pClass->getParts ? d->pClass->getParts(d) : 1;
++	if (partCount <= 0) {
++		partCount = 1;
++	}
++	blog(LOG_INFO, "[HFR-PPT] 已载入：%s，共 %d 页", QFileInfo(pptxPath).fileName().toUtf8().constData(), partCount);
++	return true;
++}
++
++void HFRPpt::CloseDocument()
++{
++	if (doc) {
++		LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++		if (d->pClass && d->pClass->destroy) {
++			d->pClass->destroy(d);
++		}
++		doc = nullptr;
++	}
++	openedPath.clear();
++	partCount = 0;
++}
++
++bool HFRPpt::IsOpen() const
++{
++	return doc != nullptr;
++}
++
++int HFRPpt::PartCount() const
++{
++	return partCount;
++}
++
++int HFRPpt::CurrentPart() const
++{
++	if (!doc) {
++		return -1;
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	return d->pClass->getPart ? d->pClass->getPart(d) : 0;
++}
++
++bool HFRPpt::SetPart(int index)
++{
++	if (!doc || index < 0 || index >= partCount) {
++		return false;
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	if (!d->pClass->setPart) {
++		return false;
++	}
++	d->pClass->setPart(d, index);
++	return true;
++}
++
++bool HFRPpt::NextPart()
++{
++	if (!doc) {
++		return false;
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	/* 用 UNO 命令翻页：与 Impress 放映行为一致，也便于后续接动画步进 */
++	if (d->pClass->postUnoCommand) {
++		d->pClass->postUnoCommand(d, ".uno:NextPage", nullptr, false);
++		return true;
++	}
++	return SetPart(CurrentPart() + 1);
++}
++
++bool HFRPpt::PrevPart()
++{
++	if (!doc) {
++		return false;
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	if (d->pClass->postUnoCommand) {
++		d->pClass->postUnoCommand(d, ".uno:PreviousPage", nullptr, false);
++		return true;
++	}
++	return SetPart(CurrentPart() - 1);
++}
++
++bool HFRPpt::RenderCurrentPart(uint32_t w, uint32_t h, std::vector<uint8_t> &bgraOut, QString *errOut)
++{
++	if (!doc) {
++		lastError = QStringLiteral("尚未打开 PPT");
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++	if (w == 0 || h == 0) {
++		return false;
++	}
++	LibreOfficeKitDocument *d = (LibreOfficeKitDocument *)doc;
++	if (!d->pClass->paintTile || !d->pClass->getDocumentSize) {
++		lastError = QStringLiteral("当前 LOK 版本缺少 paintTile/getDocumentSize");
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++
++	long docW = 0, docH = 0;
++	d->pClass->getDocumentSize(d, &docW, &docH);
++	if (docW <= 0 || docH <= 0) {
++		lastError = QStringLiteral("取文档尺寸失败");
++		if (errOut) {
++			*errOut = lastError;
++		}
++		return false;
++	}
++
++	if (d->pClass->setClientZoom) {
++		/* 让 1 像素 ≈ 1 twip×zoom；这里用整数缩放保证整页映射 */
++		const int zoomNum = (int)w;
++		d->pClass->setClientZoom(d, zoomNum, (int)h, (int)docW, (int)docH);
++	}
++	if (d->pClass->setClientVisibleArea) {
++		d->pClass->setClientVisibleArea(d, 0, 0, (int)docW, (int)docH);
++	}
++
++	bgraOut.assign((size_t)w * h * 4, 0xFF);
++	d->pClass->paintTile(d, bgraOut.data(), (int)w, (int)h, 0, 0, (int)docW, (int)docH);
++	return true;
++}
++
++static void WriteBmp32(const QString &path, uint32_t w, uint32_t h, const std::vector<uint8_t> &bgra)
++{
++	const uint32_t rowBytes = w * 4;
++	const uint32_t imgSize = rowBytes * h;
++	const uint32_t fileSize = 54 + imgSize;
++	QFile f(path);
++	if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++		return;
++	}
++	uint8_t hdr[54] = {0};
++	hdr[0] = 'B';
++	hdr[1] = 'M';
++	memcpy(hdr + 2, &fileSize, 4);
++	uint32_t off = 54;
++	memcpy(hdr + 10, &off, 4);
++	uint32_t hdrSize = 40;
++	memcpy(hdr + 14, &hdrSize, 4);
++	memcpy(hdr + 18, &w, 4);
++	memcpy(hdr + 22, &h, 4);
++	uint16_t planes = 1, bpp = 32;
++	memcpy(hdr + 26, &planes, 2);
++	memcpy(hdr + 28, &bpp, 2);
++	memcpy(hdr + 34, &imgSize, 4);
++	f.write((const char *)hdr, 54);
++	/* BMP 行序自底向上：这里直接写（验证用途，翻不翻转都能看出内容） */
++	f.write((const char *)bgra.data(), (qint64)imgSize);
++	f.close();
++}
++
++bool HFRPpt::RenderToBmpForTest(uint32_t w, uint32_t h, const QString &bmpPath, QString *statsOut, QString *errOut)
++{
++	std::vector<uint8_t> buf;
++	if (!RenderCurrentPart(w, h, buf, errOut)) {
++		return false;
++	}
++	WriteBmp32(bmpPath, w, h, buf);
++
++	/* 统计：非白像素比例（判断是否真的渲染出内容，而不是空白页） */
++	size_t nonWhite = 0;
++	const size_t px = (size_t)w * h;
++	for (size_t i = 0; i < px; i++) {
++		const uint8_t b = buf[i * 4 + 0], g = buf[i * 4 + 1], r = buf[i * 4 + 2];
++		if (!(b > 245 && g > 245 && r > 245)) {
++			nonWhite++;
++		}
++	}
++	const double pct = px ? (100.0 * (double)nonWhite / (double)px) : 0.0;
++	if (statsOut) {
++		*statsOut = QStringLiteral("非白像素 %1%（%2x%3，第 %4/%5 页）")
++				    .arg(pct, 0, 'f', 2)
++				    .arg(w)
++				    .arg(h)
++				    .arg(CurrentPart() + 1)
++				    .arg(partCount);
++	}
++	return true;
++}
++
++#else /* !HFR_ENABLE_PPT */
++
++bool HFRPpt::EnsureLoaded(QString *errOut)
++{
++	lastError = QStringLiteral("本构建未启用 PPT 支持（重新配置时加 -DHFR_ENABLE_PPT=ON）");
++	if (errOut) {
++		*errOut = lastError;
++	}
++	return false;
++}
++
++bool HFRPpt::OpenDocument(const QString &, QString *errOut)
++{
++	return EnsureLoaded(errOut);
++}
++
++void HFRPpt::CloseDocument() {}
++bool HFRPpt::IsOpen() const
++{
++	return false;
++}
++int HFRPpt::PartCount() const
++{
++	return 0;
++}
++int HFRPpt::CurrentPart() const
++{
++	return -1;
++}
++bool HFRPpt::SetPart(int)
++{
++	return false;
++}
++bool HFRPpt::NextPart()
++{
++	return false;
++}
++bool HFRPpt::PrevPart()
++{
++	return false;
++}
++bool HFRPpt::RenderCurrentPart(uint32_t, uint32_t, std::vector<uint8_t> &, QString *errOut)
++{
++	return EnsureLoaded(errOut);
++}
++bool HFRPpt::RenderToBmpForTest(uint32_t, uint32_t, const QString &, QString *, QString *errOut)
++{
++	return EnsureLoaded(errOut);
++}
++
++#endif
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRPpt.hpp b/frontend/widgets/HFRPpt.hpp
+new file mode 100644
+index 0000000..1c778a3
+--- /dev/null
++++ b/frontend/widgets/HFRPpt.hpp
+@@ -0,0 +1,56 @@
++#pragma once
++
++#include <QString>
++#include <cstdint>
++#include <vector>
++
++/* ============================================================
++ * HFRPpt —— 同进程 LibreOfficeKit（LOK）演示文档（pptx）渲染
++ * 设计要点（产品方要求）：
++ *   - 本地化部署 LibreOffice，**不走 IPC 桥接**：直接加载 program/mergedlo.dll，
++ *     通过导出符号 lok_preinit_2 取得 LibreOfficeKit*，同进程调用其 vtable。
++ *   - 动画：LOK 为静态渲染，一期按"每页最终状态"呈现（页间用自建转场）。
++ *   - 文字：按目标分辨率整页渲染；后续加"缺失字体报告/替换表"与 2x 超采样。
++ * 编译开关：HFR_ENABLE_PPT=ON 时才启用（未启用时接口返回失败并给出提示）。
++ * ============================================================ */
++class HFRPpt {
++public:
++	static HFRPpt &Instance();
++
++	/* LibreOffice 安装根目录（含 program/ 与 share/）；默认取环境变量 HFR_LO_PATH，
++	 * 否则用 D:/HuafeirongOBS/tools/LibreOffice */
++	static QString DefaultLoPath();
++
++	bool Enabled() const;
++	bool EnsureLoaded(QString *errOut);
++	bool OpenDocument(const QString &pptxPath, QString *errOut);
++	void CloseDocument();
++	bool IsOpen() const;
++
++	int PartCount() const;
++	int CurrentPart() const;
++	bool SetPart(int index);
++	bool NextPart();
++	bool PrevPart();
++
++	/* 整页渲染为 BGRA（每像素 4 字节，行序自顶向下）；w/h 为目标像素尺寸 */
++	bool RenderCurrentPart(uint32_t w, uint32_t h, std::vector<uint8_t> &bgraOut, QString *errOut);
++
++	QString LastError() const { return lastError; }
++
++	/* 便捷：渲染当前页并保存 BMP（用于人工验证），返回非白像素占比等统计 */
++	bool RenderToBmpForTest(uint32_t w, uint32_t h, const QString &bmpPath, QString *statsOut, QString *errOut);
++
++private:
++	HFRPpt() = default;
++	~HFRPpt();
++	HFRPpt(const HFRPpt &) = delete;
++	HFRPpt &operator=(const HFRPpt &) = delete;
++
++	QString lastError;
++	void *libHandle = nullptr;   /* HMODULE */
++	void *kit = nullptr;         /* LibreOfficeKit* */
++	void *doc = nullptr;         /* LibreOfficeKitDocument* */
++	QString openedPath;
++	int partCount = 0;
++};
+-- 
+2.55.0.windows.5
+
