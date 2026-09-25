@@ -30,6 +30,13 @@
 - 渲染结果 → **画布纹理**（投影/直播直接出画面）、**讲者视图**（备注 + 下一页）
 - **缺失字体报告与替换表**、2× 超采样、动画步骤预渲染（二期）
 
+## 一·六、运行时嵌入（自包含分发）
+- **查找顺序**：`obs64.exe 同目录\lo\`（嵌入式优先）→ 环境变量 `HFR_LO_PATH` → 开发机 `tools/LibreOffice`
+- **构建时自动嵌入**：CMake `HFR_EMBED_LO=ON`（默认 ON）用 `copy_directory_if_different` 把运行时复制到
+  `build_x64/rundir/<Config>/bin/64bit/lo/`，与 `obs64.exe` 同级 → **拷贝整个 `bin\64bit` 即可分发**，用户无需另装 LibreOffice
+  （首次复制约 350MB，后续只同步变化文件；关闭：`-DHFR_EMBED_LO=OFF`）
+- **一键获取运行时**（新机器/新克隆）：`scripts\fetch-libreoffice-runtime.cmd`（下载官方 MSI + `msiexec /a` 免管理员解包）
+
 ## 二、渲染接入（同进程优先）
 1. **LOK（LibreOfficeKit，进程内）**：加载 `program\sofficeapp.dll` 导出的 `lok_init_2 / lok_document_load / lok_document_render` 等 C API。
    - 输出 BGRA 位图 → 上传为 `gs_texture` → 进画布/投影（与现有画布机制天然契合）
