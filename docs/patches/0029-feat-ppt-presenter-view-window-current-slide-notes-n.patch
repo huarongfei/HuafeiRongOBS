@@ -1,7 +1,7 @@
 From cfd3a20f95cbb700540b4d6c143eaf0f94497400 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:53:38 +0800
-Subject: [PATCH 29/31] feat(ppt): presenter view window (current slide + notes
+Subject: [PATCH 29/32] feat(ppt): presenter view window (current slide + notes
  + next preview, global paging for clickers) bound to the PPT source document
 
 ---

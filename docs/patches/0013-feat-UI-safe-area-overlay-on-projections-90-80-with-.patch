@@ -1,7 +1,7 @@
 From 26ed6a6a958593b8b364a2715b799da9c72b5c21 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 19:56:20 +0800
-Subject: [PATCH 13/31] feat(UI): safe-area overlay on projections (90%/80%)
+Subject: [PATCH 13/32] feat(UI): safe-area overlay on projections (90%/80%)
  with per-canvas toggle memory
 
 ---

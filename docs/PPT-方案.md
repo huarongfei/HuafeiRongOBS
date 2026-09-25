@@ -44,6 +44,22 @@
   （首次复制约 350MB，后续只同步变化文件；关闭：`-DHFR_EMBED_LO=OFF`）
 - **一键获取运行时**（新机器/新克隆）：`scripts\fetch-libreoffice-runtime.cmd`（下载官方 MSI + `msiexec /a` 免管理员解包）
 
+## 一·七、【重要结论】改用 "soffice 转 PDF + pdfium 渲染"（已实现）
+### 为什么放弃进程内 LOK
+- 官方 LibreOfficeKit(LOK) 定位为 Linux；Windows 版为实验性。实测（本机 LO 26.2.6）：
+  - `lok_preinit_2` 路径：init 成功，但 `documentLoad` 于 mergedlo 内部 AV(0xC0000005)
+  - 官方推荐入口 `libreofficekit_hook_2`（dlopen + PATH + 正确 install_path）：**在 hook 内部即 AV**
+  - 两种入口 × 两种宿主（OBS 进程 / 独立 .NET 进程）结果一致 → **stock 版 LO 在 Windows 上不支持进程内嵌入**
+- 结论：不再依赖 LOK。
+
+### 现行流水线（本地化、无常驻桥）
+1. **导入时**：随包 `soffice.exe --headless --convert-to pdf` 一次性转换 → 进程随即退出（无 IPC、无常驻）
+2. **渲染时**：进程内加载 LO 自带 **pdfiumlo.dll**（须用 `LOAD_WITH_ALTERED_SEARCH_PATH`，否则 126），
+   逐页 `FPDF_LoadPage → FPDF_RenderPageBitmap` 渲染为 BGRA（等比居中、白底）
+3. **收益**：PDF 内嵌字体 → 中文/缺字体环境排版一致性显著更好；矢量渲染清晰
+4. **缓存**：转出的 PDF 存 `<profile>\hfr_ppt_cache\<名称>.pdf`，源文件未更新则复用
+5. **隔离验证**（不启动 OBS）：`pages=2, pageSize=793×446, nonWhite=16.58%` → 内容确实渲染
+
 ## 二、渲染接入（同进程优先）
 1. **LOK（LibreOfficeKit，进程内）**：加载 `program\sofficeapp.dll` 导出的 `lok_init_2 / lok_document_load / lok_document_render` 等 C API。
    - 输出 BGRA 位图 → 上传为 `gs_texture` → 进画布/投影（与现有画布机制天然契合）

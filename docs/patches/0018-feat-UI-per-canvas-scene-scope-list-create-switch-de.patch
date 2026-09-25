@@ -1,7 +1,7 @@
 From a1e67713edc07ecf06b1c9a27d24ea2257f6ea98 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 12 Sep 2026 20:21:14 +0800
-Subject: [PATCH 18/31] =?UTF-8?q?feat(UI):=20per-canvas=20scene=20scope=20?=
+Subject: [PATCH 18/32] =?UTF-8?q?feat(UI):=20per-canvas=20scene=20scope=20?=
  =?UTF-8?q?=E2=80=94=20list/create/switch/delete=20scenes=20+=20add=20colo?=
  =?UTF-8?q?r=20into=20scene?=
 MIME-Version: 1.0

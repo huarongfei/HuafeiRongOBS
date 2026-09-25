@@ -1,7 +1,7 @@
 From 65e6a06c0fe2469bbce72ad507c1a4c86b6d6896 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sat, 5 Sep 2026 23:50:08 +0800
-Subject: [PATCH 01/31] feat(M1 spike): E1/E2 second-canvas demo window +
+Subject: [PATCH 01/32] feat(M1 spike): E1/E2 second-canvas demo window +
  HFR(M1) menu (clone & independent color canvas)
 
 ---

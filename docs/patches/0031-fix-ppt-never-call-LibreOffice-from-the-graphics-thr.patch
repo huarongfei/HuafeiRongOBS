@@ -1,7 +1,7 @@
 From bb1620f5e0521a60083c14c110d3a5fc3770eeb5 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 20:05:30 +0800
-Subject: [PATCH 31/31] =?UTF-8?q?fix(ppt):=20never=20call=20LibreOffice=20?=
+Subject: [PATCH 31/32] =?UTF-8?q?fix(ppt):=20never=20call=20LibreOffice=20?=
  =?UTF-8?q?from=20the=20graphics=20thread=20=E2=80=94=20do=20all=20LOK=20w?=
  =?UTF-8?q?ork=20on=20the=20UI=20thread=20(fixes=20mergedlo=20AV=20in=20ob?=
  =?UTF-8?q?s=5Fsource=5Fvideo=5Ftick)?=

@@ -1,7 +1,7 @@
 From 4347dc570b0ec2ed50ee7aa538147ca95fb96753 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:25:52 +0800
-Subject: [PATCH 26/31] refactor: centralize HFR entry declarations
+Subject: [PATCH 26/32] refactor: centralize HFR entry declarations
  (HfrRegisterPptSource/HfrPptTestOutputDir) in HFRPpt.hpp; drop local forward
  decls and duplicate impl
 
