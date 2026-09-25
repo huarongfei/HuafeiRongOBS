@@ -19,6 +19,13 @@
 - 控制台新增 **PPT** 行：`打开PPT` / `PPT上一页` / `PPT下一页`；渲染输出 `<profile>\hfr_ppt_preview.bmp`，状态栏给出**非白像素占比 + 页号**（用于判断内容是否真的渲染出来）
 - 无人值守自检：设 `HFR_PPT_AUTOTEST=<pptx路径>` 启动，5 秒后自动渲染并写日志 `[HFR-PPT] autotest OK: 非白像素 …%`
 
+### 已实现（本轮）：作为**正规 OBS 来源**导入
+- 来源类型 id `hfr_ppt_source`，名称 **"PPT 演示文稿（LibreOffice）"**；启动时由前端注册（`HfrRegisterPptSource()`）
+- 使用方式：**来源 → + → PPT 演示文稿（LibreOffice）**
+- 属性：选择 pptx 文件、渲染宽度/高度、页码（从 0 起）、按钮 **上一页 / 下一页 / 重新载入文件**，并显示"共 N 页，当前第 M 页"或具体错误
+- 渲染：`video_tick` 内 CPU 渲染整页 → `video_render` 内上传 `GS_BGRA` 纹理并 `obs_source_draw`，因此**投影/推流/每画布录制自动带上 PPT**（标准源管线）
+- 实现文件：`frontend/widgets/HFRPptSource.{hpp,cpp}`（配合 `HFRPpt.{hpp,cpp}` 的多实例文档）
+
 ### 尚未做的（下一步）
 - 渲染结果 → **画布纹理**（投影/直播直接出画面）、**讲者视图**（备注 + 下一页）
 - **缺失字体报告与替换表**、2× 超采样、动画步骤预渲染（二期）

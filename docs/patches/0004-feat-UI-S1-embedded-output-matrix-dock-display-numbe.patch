@@ -1,7 +1,7 @@
 From 1c91f3886f30e2367d413e7f6203c14d02c4aad3 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:38:41 +0800
-Subject: [PATCH 04/24] =?UTF-8?q?feat(UI):=20S1=20embedded=20output-matrix?=
+Subject: [PATCH 04/25] =?UTF-8?q?feat(UI):=20S1=20embedded=20output-matrix?=
  =?UTF-8?q?=20dock=20=E2=80=94=20display=20numbering,=20canvas=20list=20(m?=
  =?UTF-8?q?ain+user),=20create/remove,=20project-to-screen#,=20managed=20p?=
  =?UTF-8?q?rojectors?=

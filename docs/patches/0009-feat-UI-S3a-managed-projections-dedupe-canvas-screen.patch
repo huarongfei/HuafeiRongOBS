@@ -1,7 +1,7 @@
 From d36d24fcc1c470f74dabe425cd5f3ca6d222470d Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:56:03 +0800
-Subject: [PATCH 09/24] =?UTF-8?q?feat(UI):=20S3a=20managed=20projections?=
+Subject: [PATCH 09/25] =?UTF-8?q?feat(UI):=20S3a=20managed=20projections?=
  =?UTF-8?q?=20=E2=80=94=20dedupe=20canvas+screen,=20stop=20per=20canvas,?=
  =?UTF-8?q?=20auto-close=20on=20canvas=20delete?=
 MIME-Version: 1.0

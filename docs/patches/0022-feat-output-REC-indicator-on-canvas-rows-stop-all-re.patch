@@ -1,7 +1,7 @@
 From f229ae983144443fdda933c41a24cd6d399857b9 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 18:15:25 +0800
-Subject: [PATCH 22/24] feat(output): REC indicator on canvas rows +
+Subject: [PATCH 22/25] feat(output): REC indicator on canvas rows +
  stop-all-recordings button
 
 ---

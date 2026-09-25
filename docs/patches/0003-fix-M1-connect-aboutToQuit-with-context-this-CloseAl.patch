@@ -1,7 +1,7 @@
 From 4a29b2068a1a553f6b80fd06ea6cd81d4a674392 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:31:05 +0800
-Subject: [PATCH 03/24] fix(M1): connect aboutToQuit with context this;
+Subject: [PATCH 03/25] fix(M1): connect aboutToQuit with context this;
  CloseAll demo windows before obs_shutdown
 
 ---

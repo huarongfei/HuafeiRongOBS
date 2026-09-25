@@ -1,7 +1,7 @@
 From 5daebbac7e4e8b249f030eec1e6a310e567d9c34 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 18:13:32 +0800
-Subject: [PATCH 21/24] feat(output): encoder selection combo (list available
+Subject: [PATCH 21/25] feat(output): encoder selection combo (list available
  H.264 encoders, fallback to obs_x264)
 
 ---

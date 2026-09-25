@@ -1,7 +1,7 @@
 From 55bab635628946208aff57bbf2b971abd0371f83 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:44:48 +0800
-Subject: [PATCH 05/24] feat(UI): S2 canvas rows with live thumbnails, pick-row
+Subject: [PATCH 05/25] feat(UI): S2 canvas rows with live thumbnails, pick-row
  scope, fill-test-color (guarded off main canvas)
 
 ---
