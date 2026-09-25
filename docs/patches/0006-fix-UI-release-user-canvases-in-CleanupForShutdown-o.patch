@@ -1,7 +1,7 @@
 From 26ca11e9eb6087673afb4788a6e5e71a64f72286 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:48:11 +0800
-Subject: [PATCH 06/22] fix(UI): release user canvases in CleanupForShutdown on
+Subject: [PATCH 06/23] fix(UI): release user canvases in CleanupForShutdown on
  aboutToQuit (shutdown race c0000005)
 
 ---

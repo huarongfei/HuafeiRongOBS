@@ -1,0 +1,391 @@
+From 543b76cb9c9f99db8f8e3212eef57c074c33d81f Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 18:24:34 +0800
+Subject: [PATCH 23/23] =?UTF-8?q?feat(output):=20per-canvas=20RTMP=20strea?=
+ =?UTF-8?q?ming=20=E2=80=94=20encoders=20bound=20to=20canvas=20video,=20se?=
+ =?UTF-8?q?rvice=20cloned=20from=20current=20settings,=20LIVE=20indicator?=
+ =?UTF-8?q?=20+=20stop-all?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRConsole.cpp | 263 +++++++++++++++++++++++++++-----
+ frontend/widgets/HFRConsole.hpp |  16 +-
+ 2 files changed, 242 insertions(+), 37 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index fdc74aa..9dc8268 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -35,7 +35,8 @@ static void HfrLog(const char *msg)
+ 
+ /* ---------------------------- HFRCanvasRow ---------------------------- */
+ 
+-HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, bool recording, QWidget *parent) : QWidget(parent), canvas(cv)
++HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, bool recording, bool streaming, QWidget *parent)
++	: QWidget(parent), canvas(cv)
+ {
+ 	QHBoxLayout *layout = new QHBoxLayout(this);
+ 	layout->setContentsMargins(2, 2, 2, 2);
+@@ -49,8 +50,15 @@ HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, bool recording, QWidget *parent) :
+ 	QVBoxLayout *txt = new QVBoxLayout();
+ 	QLabel *name = new QLabel(this);
+ 	QString title = QString::fromUtf8(obs_canvas_get_name(cv));
++	QString prefix;
++	if (streaming) {
++		prefix += QStringLiteral("● LIVE  ");
++	}
+ 	if (recording) {
+-		title = QStringLiteral("● REC  ") + title;
++		prefix += QStringLiteral("● REC  ");
++	}
++	title = prefix + title;
++	if (!prefix.isEmpty()) {
+ 		name->setStyleSheet(QStringLiteral("font-weight:bold; color:#e04040;"));
+ 	} else {
+ 		name->setStyleSheet(QStringLiteral("font-weight:bold;"));
+@@ -280,6 +288,13 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnRecStart, &QPushButton::clicked, this, [this]() { StartRecordingSelected(); });
+ 	connect(btnRecStop, &QPushButton::clicked, this, [this]() { StopRecordingSelected(); });
++	connect(btnStreamStart, &QPushButton::clicked, this, [this]() { StartStreamingSelected(); });
++	connect(btnStreamStop, &QPushButton::clicked, this, [this]() { StopStreamingSelected(); });
++	connect(btnStreamStopAll, &QPushButton::clicked, this, [this]() {
++		StopAllStreams();
++		RefreshCanvasList();
++		status->setText(QStringLiteral("已停止全部画布推流"));
++	});
+ 	connect(btnRecStopAll, &QPushButton::clicked, this, [this]() {
+ 		StopAllRecordings();
+ 		RefreshCanvasList();
+@@ -377,6 +392,7 @@ static void TeardownUserCanvas(obs_canvas_t *cv)
+ 
+ void HFRConsoleDock::CleanupForShutdown()
+ {
++	StopAllStreams();
+ 	StopAllRecordings();
+ 	CloseAllProjectors();
+ 	for (obs_canvas_t *cv : canvases) {
+@@ -415,7 +431,7 @@ void HFRConsoleDock::AddCanvasRowItem(obs_canvas_t *cv, const QString &label)
+ 	Q_UNUSED(label);
+ 	QListWidgetItem *item = new QListWidgetItem(canvasList);
+ 	item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(cv)));
+-	HFRCanvasRow *row = new HFRCanvasRow(cv, recordings.contains(cv), canvasList);
++	HFRCanvasRow *row = new HFRCanvasRow(cv, recordings.contains(cv), streams.contains(cv), canvasList);
+ 	item->setSizeHint(row->sizeHint());
+ 	canvasList->setItemWidget(item, row);
+ }
+@@ -645,6 +661,62 @@ void HFRConsoleDock::FillColorIntoSelectedScene()
+ 	HfrLog("color added into canvas scene");
+ }
+ 
++/* ---------------- 编码器公共创建（绑画布 video / 全局音频） ---------------- */
++
++static obs_encoder_t *CreateCanvasVideoEncoder(obs_canvas_t *cv, const QString &encId, QString *usedId)
++{
++	struct obs_video_info ovi = {};
++	uint32_t w = 1280, h = 720;
++	if (obs_canvas_get_video_info(cv, &ovi) && ovi.base_width && ovi.base_height) {
++		w = ovi.base_width;
++		h = ovi.base_height;
++	}
++	UNUSED_PARAMETER(w);
++	UNUSED_PARAMETER(h);
++
++	const QString canvasName = QString::fromUtf8(obs_canvas_get_name(cv));
++	const QString nm = canvasName + QStringLiteral(" · 视频");
++
++	auto make = [&](const QString &id) -> obs_encoder_t * {
++		obs_data_t *vs = obs_data_create();
++		obs_data_set_string(vs, "rate_control", "CBR");
++		obs_data_set_int(vs, "bitrate", 6000);
++		obs_data_set_int(vs, "keyint_sec", 2);
++		if (id == QStringLiteral("obs_x264")) {
++			obs_data_set_string(vs, "preset", "veryfast");
++			obs_data_set_string(vs, "profile", "high");
++		}
++		obs_encoder_t *e = obs_video_encoder_create(id.toUtf8().constData(), nm.toUtf8().constData(), vs, nullptr);
++		obs_data_release(vs);
++		return e;
++	};
++
++	QString id = encId.isEmpty() ? QStringLiteral("obs_x264") : encId;
++	obs_encoder_t *e = make(id);
++	if (!e && id != QStringLiteral("obs_x264")) {
++		id = QStringLiteral("obs_x264");
++		e = make(id);
++	}
++	if (e && usedId) {
++		*usedId = id;
++	}
++	return e;
++}
++
++static obs_encoder_t *CreateCanvasAudioEncoder(obs_canvas_t *cv)
++{
++	const QString canvasName = QString::fromUtf8(obs_canvas_get_name(cv));
++	const QString nm = canvasName + QStringLiteral(" · 音频");
++	obs_data_t *as = obs_data_create();
++	obs_data_set_int(as, "bitrate", 160);
++	obs_encoder_t *e = obs_audio_encoder_create("ffmpeg_aac", nm.toUtf8().constData(), as, 0, nullptr);
++	obs_data_release(as);
++	if (e) {
++		obs_encoder_set_audio(e, obs_get_audio());
++	}
++	return e;
++}
++
+ /* ---------------- 每画布独立录制（编码器绑定画布 video） ---------------- */
+ 
+ void HFRConsoleDock::StartRecordingSelected()
+@@ -683,45 +755,16 @@ void HFRConsoleDock::StartRecordingSelected()
+ 	const QString file = dir + QStringLiteral("/hfr_") + canvasName + QStringLiteral("_") + ts + QStringLiteral(".mkv");
+ 
+ 	QString encId = encCombo ? encCombo->currentData().toString() : QStringLiteral("obs_x264");
+-	if (encId.isEmpty()) {
+-		encId = QStringLiteral("obs_x264");
+-	}
+-	QString vname = canvasName + QStringLiteral(" · 视频");
+-
+-	auto makeEncoder = [&](const QString &id) -> obs_encoder_t * {
+-		obs_data_t *vs = obs_data_create();
+-		obs_data_set_string(vs, "rate_control", "CBR");
+-		obs_data_set_int(vs, "bitrate", 6000);
+-		obs_data_set_int(vs, "keyint_sec", 2);
+-		if (id == QStringLiteral("obs_x264")) {
+-			obs_data_set_string(vs, "preset", "veryfast");
+-			obs_data_set_string(vs, "profile", "high");
+-		}
+-		obs_encoder_t *e = obs_video_encoder_create(id.toUtf8().constData(), vname.toUtf8().constData(), vs, nullptr);
+-		obs_data_release(vs);
+-		return e;
+-	};
+-
+-	obs_encoder_t *venc = makeEncoder(encId);
+-	if (!venc && encId != QStringLiteral("obs_x264")) {
+-		HfrLog("selected encoder unavailable, falling back to obs_x264");
+-		encId = QStringLiteral("obs_x264");
+-		venc = makeEncoder(encId);
+-	}
++	QString usedEnc;
++	obs_encoder_t *venc = CreateCanvasVideoEncoder(cv, encId, &usedEnc);
+ 	if (!venc) {
+ 		status->setText(QStringLiteral("创建视频编码器失败（无可用 H.264 编码器）"));
+ 		return;
+ 	}
++	encId = usedEnc;
+ 	obs_encoder_set_video(venc, video);
+ 
+-	obs_data_t *as = obs_data_create();
+-	obs_data_set_int(as, "bitrate", 160);
+-	QString aname = canvasName + QStringLiteral(" · 音频");
+-	obs_encoder_t *aenc = obs_audio_encoder_create("ffmpeg_aac", aname.toUtf8().constData(), as, 0, nullptr);
+-	obs_data_release(as);
+-	if (aenc) {
+-		obs_encoder_set_audio(aenc, obs_get_audio());
+-	}
++	obs_encoder_t *aenc = CreateCanvasAudioEncoder(cv);
+ 
+ 	obs_data_t *os = obs_data_create();
+ 	obs_data_set_string(os, "path", file.toUtf8().constData());
+@@ -813,6 +856,154 @@ void HFRConsoleDock::StopAllRecordings()
+ 	}
+ }
+ 
++/* ---------------- 每画布推流（编码器绑画布 video + 当前推流服务） ---------------- */
++
++void HFRConsoleDock::StartStreamingSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv) {
++		status->setText(QStringLiteral("请先点选画布"));
++		return;
++	}
++	if (cv == obs_get_main_canvas()) {
++		status->setText(QStringLiteral("主画布请用 OBS 自带推流按钮；这里推流用户画布"));
++		return;
++	}
++	if (streams.contains(cv)) {
++		status->setText(QStringLiteral("该画布已在推流"));
++		return;
++	}
++
++	obs_service_t *cur = obs_frontend_get_streaming_service();
++	if (!cur) {
++		status->setText(QStringLiteral("尚未配置推流服务：请先在 设置 → 推流 填好服务器/串流密钥"));
++		return;
++	}
++	const char *type = obs_service_get_type(cur);
++	obs_data_t *sset = obs_service_get_settings(cur);
++	if (!type || !sset) {
++		if (sset) {
++			obs_data_release(sset);
++		}
++		status->setText(QStringLiteral("读取推流服务设置失败"));
++		return;
++	}
++
++	video_t *video = obs_canvas_get_video(cv);
++	if (!video) {
++		obs_data_release(sset);
++		status->setText(QStringLiteral("该画布没有视频输出"));
++		return;
++	}
++
++	const QString canvasName = QString::fromUtf8(obs_canvas_get_name(cv));
++	const QString svcName = canvasName + QStringLiteral(" · 服务");
++	obs_service_t *svc = obs_service_create(type, svcName.toUtf8().constData(), sset, nullptr);
++	obs_data_release(sset);
++	if (!svc) {
++		status->setText(QStringLiteral("创建推流服务实例失败"));
++		return;
++	}
++
++	QString encId = encCombo ? encCombo->currentData().toString() : QStringLiteral("obs_x264");
++	QString usedEnc;
++	obs_encoder_t *venc = CreateCanvasVideoEncoder(cv, encId, &usedEnc);
++	if (!venc) {
++		obs_service_release(svc);
++		status->setText(QStringLiteral("创建视频编码器失败（无可用 H.264 编码器）"));
++		return;
++	}
++	obs_encoder_set_video(venc, video);
++	obs_encoder_t *aenc = CreateCanvasAudioEncoder(cv);
++
++	const QString outName = canvasName + QStringLiteral(" · 推流");
++	obs_output_t *out = obs_output_create("rtmp_output", outName.toUtf8().constData(), nullptr, nullptr);
++	if (!out) {
++		obs_encoder_release(venc);
++		if (aenc) {
++			obs_encoder_release(aenc);
++		}
++		obs_service_release(svc);
++		status->setText(QStringLiteral("创建 RTMP 输出失败"));
++		return;
++	}
++	obs_output_set_service(out, svc);
++	obs_output_set_media(out, video, obs_get_audio());
++	obs_output_set_video_encoder(out, venc);
++	if (aenc) {
++		obs_output_set_audio_encoder(out, aenc, 0);
++	}
++
++	if (!obs_output_start(out)) {
++		const char *err = obs_output_get_last_error(out);
++		status->setText(QStringLiteral("开始推流失败：%1").arg(err ? QString::fromUtf8(err) : QStringLiteral("未知错误")));
++		obs_output_release(out);
++		obs_encoder_release(venc);
++		if (aenc) {
++			obs_encoder_release(aenc);
++		}
++		obs_service_release(svc);
++		return;
++	}
++
++	HfrStream st;
++	st.svc = svc;
++	st.out = out;
++	st.venc = venc;
++	st.aenc = aenc;
++	streams.insert(cv, st);
++	RefreshCanvasList();
++	status->setText(QStringLiteral("推流中：%1（编码器 %2）").arg(canvasName).arg(usedEnc));
++	HfrLog("canvas streaming started");
++}
++
++void HFRConsoleDock::StopStreamingSelected()
++{
++	obs_canvas_t *cv = CanvasFromRow(canvasList->currentRow());
++	if (!cv || !streams.contains(cv)) {
++		status->setText(QStringLiteral("该画布没有在推流"));
++		return;
++	}
++	HfrStream st = streams.take(cv);
++	if (st.out) {
++		obs_output_stop(st.out);
++		obs_output_release(st.out);
++	}
++	if (st.venc) {
++		obs_encoder_release(st.venc);
++	}
++	if (st.aenc) {
++		obs_encoder_release(st.aenc);
++	}
++	if (st.svc) {
++		obs_service_release(st.svc);
++	}
++	RefreshCanvasList();
++	status->setText(QStringLiteral("已停止推流：%1").arg(QString::fromUtf8(obs_canvas_get_name(cv))));
++	HfrLog("canvas streaming stopped");
++}
++
++void HFRConsoleDock::StopAllStreams()
++{
++	const auto keys = streams.keys();
++	for (obs_canvas_t *cv : keys) {
++		HfrStream st = streams.take(cv);
++		if (st.out) {
++			obs_output_stop(st.out);
++			obs_output_release(st.out);
++		}
++		if (st.venc) {
++			obs_encoder_release(st.venc);
++		}
++		if (st.aenc) {
++			obs_encoder_release(st.aenc);
++		}
++		if (st.svc) {
++			obs_service_release(st.svc);
++		}
++	}
++}
++
+ /* ---------------- 持久化 ---------------- */
+ 
+ QString HFRConsoleDock::StateFilePath() const
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index c6d9f66..127ec9b 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -26,7 +26,7 @@ class QScreen;
+ /* 画布行控件：缩略预览 + 文字 */
+ class HFRCanvasRow : public QWidget {
+ public:
+-	HFRCanvasRow(obs_canvas_t *cv, bool recording, QWidget *parent = nullptr);
++	HFRCanvasRow(obs_canvas_t *cv, bool recording, bool streaming, QWidget *parent = nullptr);
+ 	~HFRCanvasRow() override;
+ 
+ private:
+@@ -77,6 +77,9 @@ public:
+ 	void StopProjectionOfSelected();
+ 	void CloseAllProjectors();
+ 	void CleanupForShutdown(); /* 退出前：关投影并释放全部用户画布（obs 仍存活时） */
++	void StartStreamingSelected();     /* 把选中画布推流（编码器绑画布 video + 当前推流服务设置） */
++	void StopStreamingSelected();      /* 停止选中画布推流 */
++	void StopAllStreams();             /* 停止全部画布推流 */
+ 	void StartRecordingSelected();     /* 把选中画布录制到独立文件（编码器绑画布 video） */
+ 	void StopRecordingSelected();      /* 停止选中画布的录制 */
+ 	void StopAllRecordings();          /* 停止全部画布录制（退出/清理时用） */
+@@ -113,7 +116,18 @@ private:
+ 	};
+ 	QHash<obs_canvas_t *, HfrRecording> recordings; /* 每画布一路录制 */
+ 
++	struct HfrStream {
++		obs_service_t *svc = nullptr;
++		obs_output_t *out = nullptr;
++		obs_encoder_t *venc = nullptr;
++		obs_encoder_t *aenc = nullptr;
++	};
++	QHash<obs_canvas_t *, HfrStream> streams; /* 每画布一路推流 */
++
+ 	QComboBox *encCombo = nullptr;
++	QPushButton *btnStreamStart = nullptr;
++	QPushButton *btnStreamStop = nullptr;
++	QPushButton *btnStreamStopAll = nullptr;
+ 	QPushButton *btnRecStart = nullptr;
+ 	QPushButton *btnRecStop = nullptr;
+ 	QPushButton *btnRecStopAll = nullptr;
+-- 
+2.55.0.windows.5
+

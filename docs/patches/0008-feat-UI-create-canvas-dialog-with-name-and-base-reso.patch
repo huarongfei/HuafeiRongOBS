@@ -1,7 +1,7 @@
 From d8e0d380d697f6777702d43e588c4607b5272a70 Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:52:57 +0800
-Subject: [PATCH 08/22] feat(UI): create-canvas dialog with name and base
+Subject: [PATCH 08/23] feat(UI): create-canvas dialog with name and base
  resolution
 
 ---
