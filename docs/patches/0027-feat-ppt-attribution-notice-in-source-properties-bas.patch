@@ -1,7 +1,7 @@
 From cf94ee94476fb3fef52764d2f8c760abc58d05a1 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:32:46 +0800
-Subject: [PATCH 27/30] =?UTF-8?q?feat(ppt):=20attribution=20notice=20in=20?=
+Subject: [PATCH 27/31] =?UTF-8?q?feat(ppt):=20attribution=20notice=20in=20?=
  =?UTF-8?q?source=20properties=20=E2=80=94=20based=20on=20LibreOffice=20(L?=
  =?UTF-8?q?OK),=20with=20detected=20version?=
 MIME-Version: 1.0

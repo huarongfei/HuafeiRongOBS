@@ -1,0 +1,151 @@
+From bb1620f5e0521a60083c14c110d3a5fc3770eeb5 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 20:05:30 +0800
+Subject: [PATCH 31/31] =?UTF-8?q?fix(ppt):=20never=20call=20LibreOffice=20?=
+ =?UTF-8?q?from=20the=20graphics=20thread=20=E2=80=94=20do=20all=20LOK=20w?=
+ =?UTF-8?q?ork=20on=20the=20UI=20thread=20(fixes=20mergedlo=20AV=20in=20ob?=
+ =?UTF-8?q?s=5Fsource=5Fvideo=5Ftick)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRPptSource.cpp | 56 +++++++++++++++++++++----------
+ frontend/widgets/HFRPptSource.hpp |  5 ++-
+ frontend/widgets/HFRPresenter.cpp |  2 ++
+ 3 files changed, 45 insertions(+), 18 deletions(-)
+
+diff --git a/frontend/widgets/HFRPptSource.cpp b/frontend/widgets/HFRPptSource.cpp
+index 6869f21..37533dd 100644
+--- a/frontend/widgets/HFRPptSource.cpp
++++ b/frontend/widgets/HFRPptSource.cpp
+@@ -82,6 +82,8 @@ static void hfr_ppt_defaults(obs_data_t *settings)
+ 	obs_data_set_default_int(settings, "page", 0);
+ }
+ 
++static void hfr_ppt_render_now(HfrPptCtx *ctx); /* 前置声明（定义见下） */
++
+ static void hfr_ppt_load(HfrPptCtx *ctx)
+ {
+ 	if (ctx->file.empty()) {
+@@ -136,8 +138,24 @@ static void hfr_ppt_update(void *data, obs_data_t *settings)
+ 		ctx->doc.Close();
+ 	}
+ 	hfr_ppt_load(ctx);
+-	ctx->needCpuRender = true;
+-	ctx->needUpload = true;
++	/* 在 UI 线程内完成渲染（不得留到图形线程） */
++	hfr_ppt_render_now(ctx);
++}
++
++/* UI 线程调用：按当前页渲染并标记需要上传纹理（不触碰图形线程） */
++static void hfr_ppt_render_now(HfrPptCtx *ctx)
++{
++	if (!ctx || !ctx->doc.IsOpen()) {
++		return;
++	}
++	QString err;
++	if (ctx->doc.RenderCurrentPart(ctx->w, ctx->h, ctx->buf, &err)) {
++		ctx->needUpload = true;
++		ctx->needCpuRender = false;
++		ctx->lastError.clear();
++	} else {
++		ctx->lastError = err.toStdString();
++	}
+ }
+ 
+ /* 按钮：上一页 / 下一页 / 重新载入 —— data 为来源的 ctx */
+@@ -220,28 +238,19 @@ static obs_properties_t *hfr_ppt_properties(void *data)
+ 	return props;
+ }
+ 
++/* 注意：video_tick 运行在 OBS 图形线程上，绝对不能调用 LibreOffice（会崩，
++ * 见历史崩溃栈 tick_sources→hfr_ppt_tick→HFRPptDocument::Open→mergedlo.dll）。
++ * 所有 LOK 调用统一走 UI 线程：属性变更(update)、按钮、讲者视图翻页。 */
+ static void hfr_ppt_tick(void *data, float)
+ {
+ 	HfrPptCtx *ctx = static_cast<HfrPptCtx *>(data);
+-	if (!ctx || !ctx->needCpuRender) {
++	if (!ctx) {
+ 		return;
+ 	}
++	/* 若 UI 线程尚未渲染出内容，这里只做标记，绝不触发 LOK */
+ 	if (!ctx->doc.IsOpen()) {
+-		if (!ctx->file.empty()) {
+-			hfr_ppt_load(ctx);
+-		}
+-		if (!ctx->doc.IsOpen()) {
+-			ctx->needCpuRender = false;
+-			return;
+-		}
++		ctx->needCpuRender = false;
+ 	}
+-	QString err;
+-	if (ctx->doc.RenderCurrentPart(ctx->w, ctx->h, ctx->buf, &err)) {
+-		ctx->needUpload = true;
+-	} else {
+-		ctx->lastError = err.toStdString();
+-	}
+-	ctx->needCpuRender = false;
+ }
+ 
+ static void hfr_ppt_render(void *data, gs_effect_t *)
+@@ -280,6 +289,19 @@ HFRPptDocument *HfrPptSourceGetDoc(obs_source_t *source)
+ 	return ctx ? &ctx->doc : nullptr;
+ }
+ 
++void HfrPptSourceRenderNow(obs_source_t *source)
++{
++	if (!source) {
++		return;
++	}
++	const char *id = obs_source_get_id(source);
++	if (!id || strcmp(id, "hfr_ppt_source") != 0) {
++		return;
++	}
++	HfrPptCtx *ctx = static_cast<HfrPptCtx *>(obs_obj_get_data(source));
++	hfr_ppt_render_now(ctx);
++}
++
+ void HfrPptSourceMarkDirty(obs_source_t *source)
+ {
+ 	if (!source) {
+diff --git a/frontend/widgets/HFRPptSource.hpp b/frontend/widgets/HFRPptSource.hpp
+index 04bdccf..6fd33ee 100644
+--- a/frontend/widgets/HFRPptSource.hpp
++++ b/frontend/widgets/HFRPptSource.hpp
+@@ -12,7 +12,10 @@ class HFRPptDocument;
+ /* 取某个 PPT 来源内部使用的文档实例；非本类型来源返回 nullptr */
+ HFRPptDocument *HfrPptSourceGetDoc(obs_source_t *source);
+ 
+-/* 让该来源在下一帧重新渲染（页面变化后调用，画布/推流随即可见） */
++/* UI 线程：立即按当前页渲染并标记上传（讲者视图翻页后调用） */
++void HfrPptSourceRenderNow(obs_source_t *source);
++
++/* 让该来源在下一帧重新上传纹理（画布/推流随即可见） */
+ void HfrPptSourceMarkDirty(obs_source_t *source);
+ 
+ /* 找到第一个 PPT 来源（不增加引用，仅用于临时使用）；无则 nullptr */
+diff --git a/frontend/widgets/HFRPresenter.cpp b/frontend/widgets/HFRPresenter.cpp
+index 18e46ec..1106251 100644
+--- a/frontend/widgets/HFRPresenter.cpp
++++ b/frontend/widgets/HFRPresenter.cpp
+@@ -121,6 +121,7 @@ void HfrPresenterWindow::GotoNext()
+ 	}
+ 	d->NextPart();
+ 	if (src) {
++		HfrPptSourceRenderNow(src); /* UI 线程内完成 LOK 渲染 */
+ 		HfrPptSourceMarkDirty(src);
+ 	}
+ 	RefreshAll();
+@@ -134,6 +135,7 @@ void HfrPresenterWindow::GotoPrev()
+ 	}
+ 	d->PrevPart();
+ 	if (src) {
++		HfrPptSourceRenderNow(src);
+ 		HfrPptSourceMarkDirty(src);
+ 	}
+ 	RefreshAll();
+-- 
+2.55.0.windows.5
+

@@ -1,7 +1,7 @@
 From 3e88f345c63a63f420e283d048f3bddd223bd1c8 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 19:22:27 +0800
-Subject: [PATCH 25/30] =?UTF-8?q?feat(ppt):=20PPT=20as=20a=20real=20OBS=20?=
+Subject: [PATCH 25/31] =?UTF-8?q?feat(ppt):=20PPT=20as=20a=20real=20OBS=20?=
  =?UTF-8?q?source=20type=20(hfr=5Fppt=5Fsource)=20=E2=80=94=20add=20via=20?=
  =?UTF-8?q?Sources,=20props=20for=20file/size/page=20+=20prev/next/reload?=
  =?UTF-8?q?=20buttons,=20texture=20upload=20in=20video=5Frender;=20registe?=
