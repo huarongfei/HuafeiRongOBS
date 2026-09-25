@@ -1,0 +1,99 @@
+From 5daebbac7e4e8b249f030eec1e6a310e567d9c34 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 18:13:32 +0800
+Subject: [PATCH 21/22] feat(output): encoder selection combo (list available
+ H.264 encoders, fallback to obs_x264)
+
+---
+ frontend/widgets/HFRConsole.cpp | 38 ++++++++++++++++++++++++---------
+ frontend/widgets/HFRConsole.hpp |  2 ++
+ 2 files changed, 30 insertions(+), 10 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 0d5f2e1..5f8f92b 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -11,6 +11,7 @@
+ #include <QScreen>
+ #include <QThread>
+ #include <QVBoxLayout>
++#include <QComboBox>
+ #include <QDateTime>
+ #include <QFile>
+ #include <QFileInfo>
+@@ -670,17 +671,34 @@ void HFRConsoleDock::StartRecordingSelected()
+ 	const QString ts = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss"));
+ 	const QString file = dir + QStringLiteral("/hfr_") + canvasName + QStringLiteral("_") + ts + QStringLiteral(".mkv");
+ 
+-	obs_data_t *vs = obs_data_create();
+-	obs_data_set_string(vs, "rate_control", "CBR");
+-	obs_data_set_int(vs, "bitrate", 6000);
+-	obs_data_set_int(vs, "keyint_sec", 2);
+-	obs_data_set_string(vs, "preset", "veryfast");
+-	obs_data_set_string(vs, "profile", "high");
++	QString encId = encCombo ? encCombo->currentData().toString() : QStringLiteral("obs_x264");
++	if (encId.isEmpty()) {
++		encId = QStringLiteral("obs_x264");
++	}
+ 	QString vname = canvasName + QStringLiteral(" · 视频");
+-	obs_encoder_t *venc = obs_video_encoder_create("obs_x264", vname.toUtf8().constData(), vs, nullptr);
+-	obs_data_release(vs);
++
++	auto makeEncoder = [&](const QString &id) -> obs_encoder_t * {
++		obs_data_t *vs = obs_data_create();
++		obs_data_set_string(vs, "rate_control", "CBR");
++		obs_data_set_int(vs, "bitrate", 6000);
++		obs_data_set_int(vs, "keyint_sec", 2);
++		if (id == QStringLiteral("obs_x264")) {
++			obs_data_set_string(vs, "preset", "veryfast");
++			obs_data_set_string(vs, "profile", "high");
++		}
++		obs_encoder_t *e = obs_video_encoder_create(id.toUtf8().constData(), vname.toUtf8().constData(), vs, nullptr);
++		obs_data_release(vs);
++		return e;
++	};
++
++	obs_encoder_t *venc = makeEncoder(encId);
++	if (!venc && encId != QStringLiteral("obs_x264")) {
++		HfrLog("selected encoder unavailable, falling back to obs_x264");
++		encId = QStringLiteral("obs_x264");
++		venc = makeEncoder(encId);
++	}
+ 	if (!venc) {
+-		status->setText(QStringLiteral("创建视频编码器失败（obs_x264 不可用？）"));
++		status->setText(QStringLiteral("创建视频编码器失败（无可用 H.264 编码器）"));
+ 		return;
+ 	}
+ 	obs_encoder_set_video(venc, video);
+@@ -735,7 +753,7 @@ void HFRConsoleDock::StartRecordingSelected()
+ 	rec.aenc = aenc;
+ 	rec.path = file;
+ 	recordings.insert(cv, rec);
+-	status->setText(QStringLiteral("录制中：%1 → %2").arg(canvasName).arg(QFileInfo(file).fileName()));
++	status->setText(QStringLiteral("录制中：%1 → %2（编码器 %3）").arg(canvasName).arg(QFileInfo(file).fileName()).arg(encId));
+ 	HfrLog("canvas recording started");
+ }
+ 
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 30cef36..79f1313 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -9,6 +9,7 @@
+ #include <QPointer>
+ #include <QVector>
+ 
++class QComboBox;
+ class QListWidget;
+ class QListWidgetItem;
+ class QPushButton;
+@@ -112,6 +113,7 @@ private:
+ 	};
+ 	QHash<obs_canvas_t *, HfrRecording> recordings; /* 每画布一路录制 */
+ 
++	QComboBox *encCombo = nullptr;
+ 	QPushButton *btnRecStart = nullptr;
+ 	QPushButton *btnRecStop = nullptr;
+ 	QPushButton *btnSceneNew = nullptr;
+-- 
+2.55.0.windows.5
+

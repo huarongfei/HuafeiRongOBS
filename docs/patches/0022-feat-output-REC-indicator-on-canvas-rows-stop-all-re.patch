@@ -1,0 +1,102 @@
+From f229ae983144443fdda933c41a24cd6d399857b9 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 25 Sep 2026 18:15:25 +0800
+Subject: [PATCH 22/22] feat(output): REC indicator on canvas rows +
+ stop-all-recordings button
+
+---
+ frontend/widgets/HFRConsole.cpp | 21 +++++++++++++++++----
+ frontend/widgets/HFRConsole.hpp |  3 ++-
+ 2 files changed, 19 insertions(+), 5 deletions(-)
+
+diff --git a/frontend/widgets/HFRConsole.cpp b/frontend/widgets/HFRConsole.cpp
+index 5f8f92b..fdc74aa 100644
+--- a/frontend/widgets/HFRConsole.cpp
++++ b/frontend/widgets/HFRConsole.cpp
+@@ -35,7 +35,7 @@ static void HfrLog(const char *msg)
+ 
+ /* ---------------------------- HFRCanvasRow ---------------------------- */
+ 
+-HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, QWidget *parent) : QWidget(parent), canvas(cv)
++HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, bool recording, QWidget *parent) : QWidget(parent), canvas(cv)
+ {
+ 	QHBoxLayout *layout = new QHBoxLayout(this);
+ 	layout->setContentsMargins(2, 2, 2, 2);
+@@ -48,8 +48,14 @@ HFRCanvasRow::HFRCanvasRow(obs_canvas_t *cv, QWidget *parent) : QWidget(parent),
+ 
+ 	QVBoxLayout *txt = new QVBoxLayout();
+ 	QLabel *name = new QLabel(this);
+-	name->setText(QString::fromUtf8(obs_canvas_get_name(cv)));
+-	name->setStyleSheet(QStringLiteral("font-weight:bold;"));
++	QString title = QString::fromUtf8(obs_canvas_get_name(cv));
++	if (recording) {
++		title = QStringLiteral("● REC  ") + title;
++		name->setStyleSheet(QStringLiteral("font-weight:bold; color:#e04040;"));
++	} else {
++		name->setStyleSheet(QStringLiteral("font-weight:bold;"));
++	}
++	name->setText(title);
+ 	txt->addWidget(name);
+ 
+ 	struct obs_video_info ovi;
+@@ -274,6 +280,11 @@ HFRConsoleDock::HFRConsoleDock(QWidget *parent) : QDockWidget(parent)
+ 	connect(btnStopOne, &QPushButton::clicked, this, [this]() { StopProjectionOfSelected(); });
+ 	connect(btnRecStart, &QPushButton::clicked, this, [this]() { StartRecordingSelected(); });
+ 	connect(btnRecStop, &QPushButton::clicked, this, [this]() { StopRecordingSelected(); });
++	connect(btnRecStopAll, &QPushButton::clicked, this, [this]() {
++		StopAllRecordings();
++		RefreshCanvasList();
++		status->setText(QStringLiteral("已停止全部画布录制"));
++	});
+ 	connect(btnStopAll, &QPushButton::clicked, this, [this]() { CloseAllProjectors(); });
+ 	connect(canvasList, &QListWidget::itemDoubleClicked, this, [this](QListWidgetItem *item) {
+ 		int row = canvasList->row(item);
+@@ -404,7 +415,7 @@ void HFRConsoleDock::AddCanvasRowItem(obs_canvas_t *cv, const QString &label)
+ 	Q_UNUSED(label);
+ 	QListWidgetItem *item = new QListWidgetItem(canvasList);
+ 	item->setData(Qt::UserRole, QVariant::fromValue<quintptr>(reinterpret_cast<quintptr>(cv)));
+-	HFRCanvasRow *row = new HFRCanvasRow(cv, canvasList);
++	HFRCanvasRow *row = new HFRCanvasRow(cv, recordings.contains(cv), canvasList);
+ 	item->setSizeHint(row->sizeHint());
+ 	canvasList->setItemWidget(item, row);
+ }
+@@ -754,6 +765,7 @@ void HFRConsoleDock::StartRecordingSelected()
+ 	rec.path = file;
+ 	recordings.insert(cv, rec);
+ 	status->setText(QStringLiteral("录制中：%1 → %2（编码器 %3）").arg(canvasName).arg(QFileInfo(file).fileName()).arg(encId));
++	RefreshCanvasList();
+ 	HfrLog("canvas recording started");
+ }
+ 
+@@ -777,6 +789,7 @@ void HFRConsoleDock::StopRecordingSelected()
+ 		obs_encoder_release(rec.aenc);
+ 	}
+ 	status->setText(QStringLiteral("已停止录制：%1").arg(name));
++	RefreshCanvasList();
+ 	HfrLog("canvas recording stopped");
+ }
+ 
+diff --git a/frontend/widgets/HFRConsole.hpp b/frontend/widgets/HFRConsole.hpp
+index 79f1313..c6d9f66 100644
+--- a/frontend/widgets/HFRConsole.hpp
++++ b/frontend/widgets/HFRConsole.hpp
+@@ -26,7 +26,7 @@ class QScreen;
+ /* 画布行控件：缩略预览 + 文字 */
+ class HFRCanvasRow : public QWidget {
+ public:
+-	HFRCanvasRow(obs_canvas_t *cv, QWidget *parent = nullptr);
++	HFRCanvasRow(obs_canvas_t *cv, bool recording, QWidget *parent = nullptr);
+ 	~HFRCanvasRow() override;
+ 
+ private:
+@@ -116,6 +116,7 @@ private:
+ 	QComboBox *encCombo = nullptr;
+ 	QPushButton *btnRecStart = nullptr;
+ 	QPushButton *btnRecStop = nullptr;
++	QPushButton *btnRecStopAll = nullptr;
+ 	QPushButton *btnSceneNew = nullptr;
+ 	QPushButton *btnSceneUse = nullptr;
+ 	QPushButton *btnSceneDel = nullptr;
+-- 
+2.55.0.windows.5
+
