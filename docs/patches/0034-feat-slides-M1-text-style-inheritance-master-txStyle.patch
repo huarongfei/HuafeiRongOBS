@@ -1,0 +1,1211 @@
+From 7a5834cd39fbfee20a54419c47110f080beb3c5a Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 9 Oct 2026 23:33:09 +0800
+Subject: [PATCH 34/34] feat(slides): M1 text-style inheritance (master
+ txStyles, bullets, indent) + placeholder geometry fallback chain + BMP/PDF
+ reference comparison harness
+
+---
+ frontend/widgets/HFRDeck.cpp       | 401 +++++++++++++++++++++++++-
+ frontend/widgets/HFRDeck.hpp       |  20 ++
+ frontend/widgets/HFRDeckDump.cpp   | 136 ++++++++-
+ frontend/widgets/HFRDeckRender.cpp | 432 +++++++++++++++++++++++++++++
+ frontend/widgets/HFRDeckRender.hpp |  39 +++
+ 5 files changed, 1020 insertions(+), 8 deletions(-)
+ create mode 100644 frontend/widgets/HFRDeckRender.cpp
+ create mode 100644 frontend/widgets/HFRDeckRender.hpp
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index 5f5de15..10bcdda 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -6,6 +6,9 @@
+ #include <fstream>
+ #include <sstream>
+ 
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
+ #include <windows.h>
+ #include <cwchar>
+ #include <cwctype>
+@@ -447,6 +450,16 @@ Color ParseColor(const XNode *fillNode, const std::map<std::wstring, std::wstrin
+ 			}
+ 		}
+ 	}
++	if (const XNode *gf = fillNode->Child(L"gradFill")) {
++		if (const XNode *lst = gf->Child(L"gsLst")) {
++			if (const XNode *gs = lst->Child(L"gs")) {
++				Color g = ParseColor(gs, theme);
++				if (g.valid) {
++					return g;
++				}
++			}
++		}
++	}
+ 	if (const XNode *pc = fillNode->Child(L"prstClr")) {
+ 		if (const std::wstring *v = pc->Attr(L"val")) {
+ 			if (*v == L"white") {
+@@ -479,7 +492,25 @@ void ParseTextBody(const XNode *txBody, Shape &sh, const std::map<std::wstring,
+ 				}
+ 			}
+ 			para.level = (int)ToI64(ppr->Attr(L"lvl"));
+-			para.bullet = ppr->Child(L"buChar") != nullptr || ppr->Child(L"buAutoNum") != nullptr;
++			if (const XNode *bc = ppr->Child(L"buChar")) {
++				if (const std::wstring *ch = bc->Attr(L"char")) {
++					para.bulletChar = *ch;
++					para.bullet = true;
++					para.bulletExplicit = true;
++				}
++			}
++			if (ppr->Child(L"buNone")) {
++				para.bullet = false;
++				para.bulletChar.clear();
++				para.bulletExplicit = true;
++			}
++			if (ppr->Child(L"buAutoNum")) {
++				para.bullet = true;
++				para.bulletExplicit = true;
++			}
++			if (const std::wstring *ml = ppr->Attr(L"marL")) {
++				para.marL = (int)_wtoi(ml->c_str());
++			}
+ 			if (const XNode *ln = ppr->Child(L"lnSpc")) {
+ 				if (const XNode *pct = ln->Child(L"spcPct")) {
+ 					para.lineSpacing = ToD(pct->Attr(L"val"), 100000.0) / 100000.0;
+@@ -492,6 +523,7 @@ void ParseTextBody(const XNode *txBody, Shape &sh, const std::map<std::wstring,
+ 			if (const XNode *rpr = r->Child(L"rPr")) {
+ 				if (const std::wstring *sz = rpr->Attr(L"sz")) {
+ 					run.sizePt = _wtof(sz->c_str()) / 100.0;
++					run.hasSize = true;
+ 				}
+ 				if (const std::wstring *b = rpr->Attr(L"b")) {
+ 					run.bold = (*b == L"1" || *b == L"true");
+@@ -532,6 +564,131 @@ void ParseTextBody(const XNode *txBody, Shape &sh, const std::map<std::wstring,
+ 
+ void ParseShapeTree(const XNode *spTree, std::vector<Shape> &out, const std::map<std::wstring, std::wstring> &theme);
+ 
++/* 解析单个 lvlNpPr → LevelStyle */
++void ParseLevelStyle(const XNode *lvlPr, LevelStyle &out, const std::map<std::wstring, std::wstring> &theme)
++{
++	if (!lvlPr) {
++		return;
++	}
++	if (const std::wstring *ml = lvlPr->Attr(L"marL")) {
++		out.marL = (int)_wtoi(ml->c_str());
++	}
++	if (const XNode *ln = lvlPr->Child(L"lnSpc")) {
++		if (const XNode *pct = ln->Child(L"spcPct")) {
++			out.lnSpcPct = ToD(pct->Attr(L"val"), 100000.0) / 100000.0;
++		}
++	}
++	if (const XNode *bc = lvlPr->Child(L"buChar")) {
++		if (const std::wstring *ch = bc->Attr(L"char")) {
++			out.bulletChar = *ch;
++		}
++	}
++	if (lvlPr->Child(L"buNone")) {
++		out.bulletNone = true;
++	}
++	if (const XNode *dr = lvlPr->Child(L"defRPr")) {
++		if (const std::wstring *sz = dr->Attr(L"sz")) {
++			out.sizePt = _wtof(sz->c_str()) / 100.0;
++		}
++		if (const std::wstring *b = dr->Attr(L"b")) {
++			out.bold = (*b == L"1" || *b == L"true");
++		}
++		if (const std::wstring *i2 = dr->Attr(L"i")) {
++			out.italic = (*i2 == L"1" || *i2 == L"true");
++		}
++		out.color = ParseColor(dr->Child(L"solidFill"), theme);
++	}
++}
++
++/* 解析母版 p:txStyles → title/body/other 各级样式 */
++void ParseTxStyles(const XNode &masterRoot, Deck &deck, const std::map<std::wstring, std::wstring> &theme)
++{
++	const XNode *txs = masterRoot.Child(L"txStyles");
++	if (!txs) {
++		return;
++	}
++	struct Entry {
++		const wchar_t *node;
++		const wchar_t *key;
++	};
++	const Entry entries[] = {{L"titleStyle", L"title"}, {L"bodyStyle", L"body"}, {L"otherStyle", L"other"}};
++	for (const Entry &e : entries) {
++		const XNode *st = txs->Child(e.node);
++		if (!st) {
++			continue;
++		}
++		std::vector<LevelStyle> levels(9);
++		for (const XNode &k : st->kids) {
++			const std::wstring ln = XNode::LocalName(k.name);
++			if (ln.size() < 5 || ln.compare(0, 3, L"lvl") != 0) {
++				continue;
++			}
++			const int idx = _wtoi(ln.substr(3, 1).c_str()) - 1;
++			if (idx < 0 || idx >= 9) {
++				continue;
++			}
++			ParseLevelStyle(&k, levels[(size_t)idx], theme);
++		}
++		deck.textStyles[e.key] = levels;
++	}
++}
++
++/* 把样式表应用到幻灯片（占位符或普通文本框） */
++void ApplyTextStyles(Slide &slide, const Deck &deck)
++{
++	const auto titleIt = deck.textStyles.find(L"title");
++	const auto bodyIt = deck.textStyles.find(L"body");
++	const auto otherIt = deck.textStyles.find(L"other");
++	for (Shape &sh : slide.shapes) {
++		const std::vector<LevelStyle> *style = nullptr;
++		if (sh.isPlaceholder) {
++			const std::wstring t = sh.phType;
++			if (t == L"title" || t == L"ctrTitle") {
++				style = (titleIt != deck.textStyles.end()) ? &titleIt->second : nullptr;
++			} else if (t.empty() || t == L"body" || t == L"subTitle" || t == L"obj") {
++				style = (bodyIt != deck.textStyles.end()) ? &bodyIt->second : nullptr;
++			} else if (otherIt != deck.textStyles.end()) {
++				style = &otherIt->second;
++			}
++		} else if (otherIt != deck.textStyles.end()) {
++			style = &otherIt->second;
++		}
++		for (Para &p : sh.paras) {
++			const LevelStyle *ls = nullptr;
++			if (style && !style->empty()) {
++				const size_t idx = (size_t)std::max(0, std::min<int>(p.level, (int)style->size() - 1));
++				ls = &(*style)[idx];
++			}
++			if (ls) {
++				if (!p.bulletExplicit) {
++					if (!ls->bulletChar.empty()) {
++						p.bulletChar = ls->bulletChar;
++						p.bullet = true;
++					} else if (ls->bulletNone) {
++						p.bullet = false;
++					}
++				}
++				if (p.marL == 0) {
++					p.marL = ls->marL;
++				}
++				if (p.lineSpacing <= 0.1 && ls->lnSpcPct > 0.1) {
++					p.lineSpacing = ls->lnSpcPct;
++				}
++			}
++			for (Run &r : p.runs) {
++				if (ls) {
++					if (!r.hasSize && ls->sizePt > 0) {
++						r.sizePt = ls->sizePt;
++					}
++					if (!r.color.valid && ls->color.valid) {
++						r.color = ls->color;
++					}
++				}
++			}
++		}
++	}
++}
++
+ void ParseShapeCommon(const XNode *node, Shape &sh, const std::map<std::wstring, std::wstring> &theme)
+ {
+ 	if (const XNode *nv = node->Child(L"nvSpPr")) {
+@@ -546,6 +703,9 @@ void ParseShapeCommon(const XNode *node, Shape &sh, const std::map<std::wstring,
+ 				if (const std::wstring *t = p->Attr(L"type")) {
+ 					sh.phType = *t;
+ 				}
++				if (const std::wstring *ix = p->Attr(L"idx")) {
++					sh.phIdx = (int)_wtoi(ix->c_str());
++				}
+ 			}
+ 		}
+ 	}
+@@ -671,13 +831,97 @@ void ParseShapeTree(const XNode *spTree, std::vector<Shape> &out, const std::map
+ }
+ 
+ /* rels: 解析 ppt/slides/_rels/slideN.xml.rels → id -> target */
+-void ParseRels(const XNode &root, std::map<std::wstring, std::wstring> &out)
++struct RelInfo {
++	std::wstring target;
++	std::wstring type;
++};
++
++void ParseRelsEx(const XNode &root, std::map<std::wstring, RelInfo> &out)
+ {
+ 	for (const XNode *rel : root.Children(L"Relationship")) {
+ 		const std::wstring *id = rel->Attr(L"Id");
+ 		const std::wstring *tg = rel->Attr(L"Target");
++		const std::wstring *ty = rel->Attr(L"Type");
+ 		if (id && tg) {
+-			out[*id] = *tg;
++			RelInfo ri;
++			ri.target = *tg;
++			if (ty) {
++				ri.type = *ty;
++			}
++			out[*id] = ri;
++		}
++	}
++}
++
++void ParseRels(const XNode &root, std::map<std::wstring, std::wstring> &out)
++{
++	std::map<std::wstring, RelInfo> tmp;
++	ParseRelsEx(root, tmp);
++	for (const auto &kv : tmp) {
++		out[kv.first] = kv.second.target;
++	}
++}
++
++/* 占位符键：type|idx */
++std::wstring PhKey(const Shape &s)
++{
++	return s.phType + L"|" + std::to_wstring(s.phIdx);
++}
++
++/* 合并占位符：后者有值才覆盖（版式常不含几何，需保留母版的） */
++void MergePlaceholder(std::map<std::wstring, Shape> &map, const std::wstring &key, const Shape &s)
++{
++	auto it = map.find(key);
++	if (it == map.end()) {
++		map[key] = s;
++		return;
++	}
++	Shape &dst = it->second;
++	if (s.w > 0 && s.h > 0) {
++		dst.x = s.x;
++		dst.y = s.y;
++		dst.w = s.w;
++		dst.h = s.h;
++	}
++	if (s.hasFill) {
++		dst.hasFill = true;
++		dst.fill = s.fill;
++	}
++	if (!s.prstGeom.empty()) {
++		dst.prstGeom = s.prstGeom;
++	}
++	if (!s.paras.empty()) {
++		dst.paras = s.paras;
++	}
++}
++
++/* 从一段 slideMaster/slideLayout XML 中取出占位符形状 */
++void CollectPlaceholders(const std::vector<uint8_t> &xml, std::map<std::wstring, Shape> &out,
++			 const std::map<std::wstring, std::wstring> &theme)
++{
++	if (xml.empty()) {
++		return;
++	}
++	XNode root;
++	if (!ParseXml(xml, root)) {
++		return;
++	}
++	const XNode *cSld = root.Child(L"cSld");
++	const XNode *spTree = cSld ? cSld->Child(L"spTree") : root.Child(L"spTree");
++	std::vector<Shape> shapes;
++	ParseShapeTree(spTree, shapes, theme);
++	for (const Shape &s : shapes) {
++		if (!s.isPlaceholder) {
++			continue;
++		}
++		MergePlaceholder(out, PhKey(s), s);
++		if (!s.phType.empty()) {
++			/* 类型兜底键（部分文档只给 type 不给 idx） */
++			MergePlaceholder(out, s.phType + L"|*", s);
++		}
++		if (s.phIdx >= 0) {
++			/* 序号兜底键（幻灯片侧常只有 idx，没有 type） */
++			MergePlaceholder(out, L"idx:" + std::to_wstring(s.phIdx), s);
+ 		}
+ 	}
+ }
+@@ -771,6 +1015,40 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 	}
+ 	out.themeColors = theme;
+ 
++	/* 母版文本样式（标题/正文各级字号与项目符号） */
++	{
++		std::map<std::wstring, RelInfo> presRelsAll;
++		{
++			std::vector<uint8_t> prb;
++			if (zip.Read("ppt/_rels/presentation.xml.rels", prb)) {
++				XNode rr;
++				if (ParseXml(prb, rr)) {
++					ParseRelsEx(rr, presRelsAll);
++				}
++			}
++		}
++		std::string masterPart;
++		for (const auto &kv : presRelsAll) {
++			if (kv.second.type.find(L"slideMaster") != std::wstring::npos) {
++				masterPart = NormalizeTarget("ppt/presentation.xml",
++							      std::string(kv.second.target.begin(), kv.second.target.end()));
++				break;
++			}
++		}
++		if (masterPart.empty()) {
++			masterPart = "ppt/slideMasters/slideMaster1.xml";
++		}
++		std::vector<uint8_t> mb;
++		if (zip.Read(masterPart, mb)) {
++			XNode mr;
++			if (ParseXml(mb, mr)) {
++				ParseTxStyles(mr, out, theme);
++			}
++		}
++		out.debugInfo += L"master=" + std::wstring(masterPart.begin(), masterPart.end()) + L" styles=" +
++				 std::to_wstring(out.textStyles.size()) + L"\n";
++	}
++
+ 	/* presentation.xml：页面尺寸 + 幻灯片顺序 */
+ 	std::vector<std::string> slideParts;
+ 	size_t dbgRelsRead = 0, dbgRelsCount = 0, dbgNoRid = 0;
+@@ -857,6 +1135,119 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 		}
+ 		ParseShapeTree(spTree, slide.shapes, theme);
+ 
++		/* —— 版式/母版占位符继承（真实稿件的正文几乎都在占位符里） —— */
++		{
++			std::map<std::wstring, Shape> phMap;
++			/* slide → slideLayout */
++			std::string layoutPart;
++			{
++				const std::string slashp = part.substr(0, part.find_last_of('/'));
++				const std::string fn = part.substr(part.find_last_of('/') + 1);
++				std::vector<uint8_t> rb;
++				if (zip.Read(slashp + "/_rels/" + fn + ".rels", rb)) {
++					XNode rr;
++					std::map<std::wstring, RelInfo> info;
++					if (ParseXml(rb, rr)) {
++						ParseRelsEx(rr, info);
++						for (const auto &kv : info) {
++							if (kv.second.type.find(L"slideLayout") != std::wstring::npos) {
++								layoutPart = NormalizeTarget(part, std::string(kv.second.target.begin(),
++									    kv.second.target.end()));
++								break;
++							}
++						}
++					}
++				}
++			}
++			/* slideLayout → slideMaster（先母版后版式覆盖） */
++			if (!layoutPart.empty()) {
++				const std::string lslash = layoutPart.substr(0, layoutPart.find_last_of('/'));
++				const std::string lfn = layoutPart.substr(layoutPart.find_last_of('/') + 1);
++				std::vector<uint8_t> rb;
++				if (zip.Read(lslash + "/_rels/" + lfn + ".rels", rb)) {
++					XNode rr;
++					std::map<std::wstring, RelInfo> info;
++					if (ParseXml(rb, rr)) {
++						ParseRelsEx(rr, info);
++						for (const auto &kv : info) {
++							if (kv.second.type.find(L"slideMaster") != std::wstring::npos) {
++								const std::string mp = NormalizeTarget(
++									layoutPart, std::string(kv.second.target.begin(), kv.second.target.end()));
++								std::vector<uint8_t> mb;
++								if (zip.Read(mp, mb)) {
++									CollectPlaceholders(mb, phMap, theme);
++								}
++								break;
++							}
++						}
++					}
++				}
++			}
++			std::vector<uint8_t> lb;
++			if (!layoutPart.empty() && zip.Read(layoutPart, lb)) {
++				CollectPlaceholders(lb, phMap, theme);
++			}
++			{
++				std::wstring dbg = L"slide" + std::to_wstring(out.slides.size() + 1) + L": layout=" +
++						   std::wstring(layoutPart.begin(), layoutPart.end()) + L" phMap=" +
++						   std::to_wstring(phMap.size());
++				for (const auto &kv : phMap) {
++					dbg += L" [" + kv.first + L"]";
++				}
++				out.debugInfo += dbg + L"\n";
++			}
++			/* 应用：位置/尺寸、填充、几何 */
++			for (Shape &sh : slide.shapes) {
++				if (!sh.isPlaceholder) {
++					continue;
++				}
++				std::vector<std::wstring> keys;
++				keys.push_back(PhKey(sh));
++				if (!sh.phType.empty()) {
++					keys.push_back(sh.phType + L"|*");
++				}
++				if (sh.phIdx >= 0) {
++					keys.push_back(L"idx:" + std::to_wstring(sh.phIdx));
++					keys.push_back(L"|" + std::to_wstring(sh.phIdx));
++					keys.push_back(L"body|" + std::to_wstring(sh.phIdx));
++				}
++				/* 择优：优先"带几何"的候选，避免空条目挡住母版回退 */
++				const Shape *best = nullptr;
++				for (const std::wstring &k : keys) {
++					auto it2 = phMap.find(k);
++					if (it2 == phMap.end()) {
++						continue;
++					}
++					if (!best) {
++						best = &it2->second;
++					}
++					if (it2->second.w > 0 && it2->second.h > 0) {
++						best = &it2->second;
++						break;
++					}
++				}
++				if (!best) {
++					out.debugInfo += L"   未命中键 " + PhKey(sh) + L"\n";
++					continue;
++				}
++				const Shape &lay = *best;
++				const bool noGeom = (sh.w <= 0 || sh.h <= 0);
++				if (noGeom) {
++					sh.x = lay.x;
++					sh.y = lay.y;
++					sh.w = lay.w;
++					sh.h = lay.h;
++				}
++				if (!sh.hasFill && lay.hasFill) {
++					sh.hasFill = true;
++					sh.fill = lay.fill;
++				}
++				if (sh.prstGeom.empty() && !lay.prstGeom.empty()) {
++					sh.prstGeom = lay.prstGeom;
++				}
++			}
++		}
++
+ 		/* 解析图片数据 */
+ 		for (Shape &sh : slide.shapes) {
+ 			if (sh.imageRelId.empty()) {
+@@ -877,6 +1268,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 				}
+ 			}
+ 		}
++		ApplyTextStyles(slide, out);
+ 		out.slides.push_back(std::move(slide));
+ 	}
+ 
+@@ -920,6 +1312,9 @@ std::string DeckSummary(const Deck &deck)
+ 			}
+ 			o << "    [" << kind << "] geom=" << std::string(sh.prstGeom.begin(), sh.prstGeom.end())
+ 			  << " pos=(" << sh.x << "," << sh.y << ") size=(" << sh.w << "x" << sh.h << ")"
++			  << (sh.isPlaceholder ? " ph=" + std::string(sh.phType.begin(), sh.phType.end()) + ":" +
++							std::to_string(sh.phIdx)
++					      : std::string())
+ 			  << (sh.hasFill ? " fill=1" : " fill=0")
+ 			  << (sh.hasImage ? " img=1" : "") << (sh.imageData.empty() ? "" : " imgBytes=" + std::to_string(sh.imageData.size()));
+ 			size_t total = 0;
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+index 0747a0b..75cc7ea 100644
+--- a/frontend/widgets/HFRDeck.hpp
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -13,9 +13,22 @@ struct Color {
+ 	uint32_t argb = 0xFF000000u;
+ };
+ 
++/* 一级文本样式（来自母版 txStyles / 版式 lstStyle） */
++struct LevelStyle {
++	double sizePt = 0;
++	bool bold = false;
++	bool italic = false;
++	Color color;
++	std::wstring bulletChar;
++	bool bulletNone = false;
++	int marL = 0;
++	double lnSpcPct = 0;
++};
++
+ struct Run {
+ 	std::wstring text;
+ 	double sizePt = 18.0;
++	bool hasSize = false;
+ 	bool bold = false;
+ 	bool italic = false;
+ 	bool underline = false;
+@@ -29,6 +42,9 @@ struct Para {
+ 	int align = 0;        /* 0=left 1=center 2=right 3=justify */
+ 	int level = 0;
+ 	bool bullet = false;
++	std::wstring bulletChar;   /* 非空 = 使用该符号作为项目符号 */
++	bool bulletExplicit = false;
++	int marL = 0;              /* 左缩进（EMU） */
+ 	double lineSpacing = 1.0;
+ };
+ 
+@@ -51,6 +67,7 @@ struct Shape {
+ 	bool hasImage = false;
+ 	bool isPlaceholder = false;
+ 	std::wstring phType;
++	int phIdx = -1;
+ 	std::vector<Shape> children;        /* 组合 */
+ };
+ 
+@@ -65,6 +82,9 @@ struct Deck {
+ 	std::wstring majorFont, minorFont;
+ 	std::map<std::wstring, std::wstring> themeColors; /* dk1/lt1/accent1.. */
+ 	std::wstring officeThemeName;
++	std::wstring debugInfo; /* 解析诊断（布局继承等） */
++	/* 文本样式表：title / body / other → 9 级 */
++	std::map<std::wstring, std::vector<LevelStyle>> textStyles;
+ };
+ 
+ /* 解析 pptx。失败时返回 false 并写入 err。 */
+diff --git a/frontend/widgets/HFRDeckDump.cpp b/frontend/widgets/HFRDeckDump.cpp
+index af36c96..4dc3a22 100644
+--- a/frontend/widgets/HFRDeckDump.cpp
++++ b/frontend/widgets/HFRDeckDump.cpp
+@@ -1,8 +1,13 @@
+-/* 独立验证：解析 pptx 并打印摘要（不依赖 OBS，便于快速迭代） */
++/* 独立验证：解析 pptx + CPU 渲染为 BMP（不依赖 OBS） */
+ #include "HFRDeck.hpp"
++#include "HFRDeckRender.hpp"
+ 
+ #include <windows.h>
++
+ #include <cstdio>
++#include <cstring>
++#include <vector>
++#include <cstdlib>
+ #include <string>
+ 
+ static std::string ToUtf8(const std::wstring &w)
+@@ -16,19 +21,140 @@ static std::string ToUtf8(const std::wstring &w)
+ 	return s;
+ }
+ 
++/* ---- pdfium 参考渲染（用于"我们的引擎 vs LibreOffice 官方渲染"保真对比） ---- */
++typedef void *FPDF_DOCUMENT;
++typedef void *FPDF_PAGE;
++typedef void *FPDF_BITMAP;
++
++static bool RenderPdfPage(const std::wstring &pdfiumDll, const std::wstring &pdfPath, int pageIdx, int W, int H,
++			  const std::wstring &bmpOut)
++{
++	HMODULE lib = LoadLibraryExW(pdfiumDll.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
++	if (!lib) {
++		lib = LoadLibraryW(pdfiumDll.c_str());
++	}
++	if (!lib) {
++		printf("pdfium load failed (%lu)\n", (unsigned long)GetLastError());
++		return false;
++	}
++	auto init = (void (*)())GetProcAddress(lib, "FPDF_InitLibrary");
++	auto loadMem = (FPDF_DOCUMENT(*)(const void *, size_t, const char *))GetProcAddress(lib, "FPDF_LoadMemDocument64");
++	auto pageCount = (int (*)(FPDF_DOCUMENT))GetProcAddress(lib, "FPDF_GetPageCount");
++	auto loadPage = (FPDF_PAGE(*)(FPDF_DOCUMENT, int))GetProcAddress(lib, "FPDF_LoadPage");
++	auto closePage = (void (*)(FPDF_PAGE))GetProcAddress(lib, "FPDF_ClosePage");
++	auto bmpCreate = (FPDF_BITMAP(*)(int, int, int, void *, int))GetProcAddress(lib, "FPDFBitmap_CreateEx");
++	auto bmpFill = (void (*)(FPDF_BITMAP, int, int, int, int, unsigned long))GetProcAddress(lib, "FPDFBitmap_FillRect");
++	auto bmpDestroy = (void (*)(FPDF_BITMAP))GetProcAddress(lib, "FPDFBitmap_Destroy");
++	auto render = (void (*)(FPDF_BITMAP, FPDF_PAGE, int, int, int, int, int, int))GetProcAddress(lib,
++											      "FPDF_RenderPageBitmap");
++	if (!init || !loadMem || !loadPage || !bmpCreate || !render) {
++		printf("pdfium symbols missing\n");
++		return false;
++	}
++	init();
++	FILE *f = nullptr;
++	if (_wfopen_s(&f, pdfPath.c_str(), L"rb") != 0 || !f) {
++		printf("pdf open failed\n");
++		return false;
++	}
++	fseek(f, 0, SEEK_END);
++	const long n = ftell(f);
++	fseek(f, 0, SEEK_SET);
++	std::vector<uint8_t> data((size_t)n);
++	size_t rd = fread(data.data(), 1, (size_t)n, f);
++	fclose(f);
++	FPDF_DOCUMENT doc = loadMem(data.data(), rd, nullptr);
++	if (!doc) {
++		printf("pdf load failed\n");
++		return false;
++	}
++	const int pages = pageCount ? pageCount(doc) : 0;
++	FPDF_PAGE page = loadPage(doc, pageIdx);
++	if (!page) {
++		printf("pdf page %d missing (pages=%d)\n", pageIdx, pages);
++		return false;
++	}
++	std::vector<uint8_t> pix((size_t)W * H * 4, 0xFF);
++	FPDF_BITMAP bmp = bmpCreate(W, H, 4, pix.data(), W * 4);
++	bmpFill(bmp, 0, 0, W, H, 0xFFFFFFFFu);
++	render(bmp, page, 0, 0, W, H, 0, 1);
++	bmpDestroy(bmp);
++	closePage(page);
++	hfr::WriteBmp32(bmpOut, W, H, pix);
++	printf("PDF OK pages=%d page=%d -> %s\n", pages, pageIdx + 1, ToUtf8(bmpOut).c_str());
++	return true;
++}
++
+ int wmain(int argc, wchar_t **argv)
+ {
+ 	SetConsoleOutputCP(CP_UTF8);
+ 	if (argc < 2) {
+-		printf("usage: hfr_deck_dump <file.pptx>\n");
++		printf("usage: hfr_deck_dump <file.pptx> [--bmp out.bmp] [--slide N] [--size WxH]\n");
+ 		return 2;
+ 	}
++	const std::wstring path = argv[1];
++	std::wstring bmpOut;
++	int slide = 0;
++	int W = 1280, H = 720;
++	std::wstring pdfRef, pdfiumDll;
++	for (int i = 2; i < argc; i++) {
++		const std::wstring a = argv[i];
++		if (a == L"--bmp" && i + 1 < argc) {
++			bmpOut = argv[++i];
++		} else if (a == L"--slide" && i + 1 < argc) {
++			slide = _wtoi(argv[++i]);
++		} else if (a == L"--pdfref" && i + 1 < argc) {
++			pdfRef = argv[++i];
++		} else if (a == L"--pdfium" && i + 1 < argc) {
++			pdfiumDll = argv[++i];
++		} else if (a == L"--size" && i + 1 < argc) {
++			const std::wstring s = argv[++i];
++			const size_t x = s.find(L'x');
++			if (x != std::wstring::npos) {
++				W = _wtoi(s.substr(0, x).c_str());
++				H = _wtoi(s.substr(x + 1).c_str());
++			}
++		}
++	}
++
+ 	hfr::Deck deck;
+ 	std::wstring err;
+-	if (!hfr::LoadDeck(argv[1], deck, err)) {
++	if (!pdfRef.empty()) {
++		return RenderPdfPage(pdfiumDll, pdfRef, slide, W, H, bmpOut) ? 0 : 1;
++	}
++	if (!hfr::LoadDeck(path, deck, err)) {
+ 		printf("FAILED: %s\n", ToUtf8(err).c_str());
+ 		return 1;
+ 	}
+-	printf("OK\n%s", hfr::DeckSummary(deck).c_str());
++	if (bmpOut.empty()) {
++		printf("OK\n%s", hfr::DeckSummary(deck).c_str());
++	if (!deck.debugInfo.empty()) {
++		printf("--- debug ---\n%s", ToUtf8(deck.debugInfo).c_str());
++	}
++		return 0;
++	}
++
++	hfr::RenderSlide rs;
++	if (!hfr::BuildSlide(deck, slide, W, H, rs, err)) {
++		printf("RENDER FAILED: %s\n", ToUtf8(err).c_str());
++		return 1;
++	}
++	std::vector<uint8_t> bgra;
++	hfr::CompositeToBgra(rs, bgra);
++	if (!hfr::WriteBmp32(bmpOut, W, H, bgra)) {
++		printf("BMP WRITE FAILED\n");
++		return 1;
++	}
++	int nText = 0, nRect = 0, nPic = 0, nTbl = 0;
++	for (const hfr::Item &it : rs.items) {
++		switch (it.kind) {
++		case hfr::ItemKind::Text: nText++; break;
++		case hfr::ItemKind::Rect: nRect++; break;
++		case hfr::ItemKind::Picture: nPic++; break;
++		case hfr::ItemKind::Table: nTbl++; break;
++		}
++	}
++	printf("RENDER OK slide=%d size=%dx%d items=%zu (text=%d rect=%d pic=%d table=%d) -> %s\n", slide + 1, W, H,
++	       rs.items.size(), nText, nRect, nPic, nTbl, ToUtf8(bmpOut).c_str());
+ 	return 0;
+-}
++}
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRDeckRender.cpp b/frontend/widgets/HFRDeckRender.cpp
+new file mode 100644
+index 0000000..da19df6
+--- /dev/null
++++ b/frontend/widgets/HFRDeckRender.cpp
+@@ -0,0 +1,432 @@
++#include "HFRDeckRender.hpp"
++
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++#include <windows.h>
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstring>
++
++namespace hfr {
++namespace {
++
++/* GDI 文本光栅化：白字黑底 → alpha = 亮度，颜色由 run 指定 */
++struct GdiText {
++	HDC dc = nullptr;
++	HBITMAP bmp = nullptr;
++	HGDIOBJ oldBmp = nullptr;
++	uint8_t *bits = nullptr;
++	int w = 0, h = 0;
++
++	bool Create(int width, int height)
++	{
++		if (width <= 0 || height <= 0 || width > 8192 || height > 8192) {
++			return false;
++		}
++		dc = CreateCompatibleDC(nullptr);
++		if (!dc) {
++			return false;
++		}
++		BITMAPINFO bi;
++		memset(&bi, 0, sizeof(bi));
++		bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
++		bi.bmiHeader.biWidth = width;
++		bi.bmiHeader.biHeight = -height; /* 自顶向下 */
++		bi.bmiHeader.biPlanes = 1;
++		bi.bmiHeader.biBitCount = 32;
++		bi.bmiHeader.biCompression = BI_RGB;
++		void *p = nullptr;
++		bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &p, nullptr, 0);
++		if (!bmp || !p) {
++			Destroy();
++			return false;
++		}
++		bits = (uint8_t *)p;
++		oldBmp = SelectObject(dc, bmp);
++		memset(bits, 0, (size_t)width * height * 4);
++		SetBkMode(dc, TRANSPARENT);
++		SetTextAlign(dc, TA_LEFT | TA_TOP);
++		w = width;
++		h = height;
++		return true;
++	}
++	void Destroy()
++	{
++		if (dc) {
++			if (oldBmp) {
++				SelectObject(dc, oldBmp);
++			}
++			if (bmp) {
++				DeleteObject(bmp);
++			}
++			DeleteDC(dc);
++		}
++		dc = nullptr;
++		bmp = nullptr;
++		oldBmp = nullptr;
++		bits = nullptr;
++	}
++	~GdiText() { Destroy(); }
++};
++
++HFONT MakeFont(const std::wstring &face, int px, bool bold, bool italic)
++{
++	LOGFONTW lf;
++	memset(&lf, 0, sizeof(lf));
++	lf.lfHeight = -px;
++	lf.lfWeight = bold ? FW_BOLD : FW_NORMAL;
++	lf.lfItalic = italic ? TRUE : FALSE;
++	lf.lfCharSet = DEFAULT_CHARSET;
++	lf.lfQuality = ANTIALIASED_QUALITY;
++	lf.lfOutPrecision = OUT_TT_PRECIS;
++	wcsncpy_s(lf.lfFaceName, LF_FACESIZE, face.empty() ? L"Microsoft YaHei" : face.c_str(), _TRUNCATE);
++	return CreateFontIndirectW(&lf);
++}
++
++int MeasureRun(HDC dc, const std::wstring &s)
++{
++	if (s.empty()) {
++		return 0;
++	}
++	SIZE sz;
++	GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
++	return sz.cx;
++}
++
++/* 贪心折行：CJK 可任意断行，拉丁优先在空格断 */
++std::vector<std::wstring> WrapText(HDC dc, const std::wstring &text, int maxW)
++{
++	std::vector<std::wstring> lines;
++	if (text.empty()) {
++		lines.push_back(L"");
++		return lines;
++	}
++	std::wstring cur;
++	int lastSpace = -1;
++	for (wchar_t ch : text) {
++		if (ch == L'\n') {
++			lines.push_back(cur);
++			cur.clear();
++			lastSpace = -1;
++			continue;
++		}
++		std::wstring next = cur;
++		next.push_back(ch);
++		if (MeasureRun(dc, next) > maxW && !cur.empty()) {
++			if (ch == L' ' || lastSpace < 0) {
++				lines.push_back(cur);
++				cur.clear();
++				cur.push_back(ch);
++				lastSpace = -1;
++			} else {
++				const std::wstring head = cur.substr(0, (size_t)lastSpace);
++				const std::wstring tail = cur.substr((size_t)lastSpace + 1);
++				lines.push_back(head);
++				cur = tail;
++				cur.push_back(ch);
++				lastSpace = -1;
++			}
++		} else {
++			cur = next;
++			if (ch == L' ') {
++				lastSpace = (int)cur.size() - 1;
++			}
++		}
++	}
++	if (!cur.empty() || lines.empty()) {
++		lines.push_back(cur);
++	}
++	return lines;
++}
++
++/* 把一个形状的文本光栅化为 BGRA（含 alpha），返回是否成功 */
++bool RasterizeText(const Shape &sh, const Deck &deck, double scale, double ptScale, std::vector<uint8_t> &out, int &outW,
++		   int &outH)
++{
++	const int boxW = std::max(1, (int)std::lround(sh.w * scale));
++	const int boxH = std::max(1, (int)std::lround(sh.h * scale));
++	GdiText g;
++	if (!g.Create(boxW, boxH)) {
++		return false;
++	}
++	int penY = 0;
++	for (const Para &para : sh.paras) {
++		/* 缩进：优先取文档 marL（EMU→px），否则按级别估算 */
++		const int indent = (para.marL > 0) ? (int)std::lround(para.marL * scale)
++						   : para.level * (int)std::lround(24 * ptScale);
++		int maxFontPx = (int)std::lround(18 * ptScale);
++		for (const Run &r : para.runs) {
++			maxFontPx = std::max(maxFontPx, (int)std::lround(r.sizePt * ptScale));
++		}
++		const int lineH = (int)std::lround(maxFontPx * 1.22 * (para.lineSpacing > 0.1 ? para.lineSpacing : 1.0));
++		for (const Run &r : para.runs) {
++			if (r.text.empty()) {
++				continue;
++			}
++			const std::wstring face = !r.ea.empty() ? r.ea : (!r.latin.empty() ? r.latin : deck.minorFont);
++			const int fontPx = std::max(4, (int)std::lround((r.sizePt > 0 ? r.sizePt : 18.0) * ptScale));
++			HFONT font = MakeFont(face, fontPx, r.bold, r.italic);
++			HGDIOBJ oldFont = SelectObject(g.dc, font);
++			SetTextColor(g.dc, RGB(255, 255, 255));
++
++			std::wstring body = r.text;
++			if (!para.bulletChar.empty()) {
++				body = para.bulletChar + L" " + body;
++			} else if (para.bullet) {
++				body = std::wstring(L"• ") + body;
++			}
++			const int availW = std::max(16, boxW - indent - (int)std::lround(8 * scale));
++			const std::vector<std::wstring> lines = WrapText(g.dc, body, availW);
++			for (const std::wstring &line : lines) {
++				if (!line.empty() && penY < boxH) {
++					int x = indent + (int)std::lround(4 * scale);
++					if (para.align == 1) {
++						x = indent + std::max(0, (availW - MeasureRun(g.dc, line)) / 2);
++					} else if (para.align == 2) {
++						x = indent + std::max(0, availW - MeasureRun(g.dc, line));
++					}
++					TextOutW(g.dc, x, penY, line.c_str(), (int)line.size());
++				}
++				penY += lineH;
++			}
++			SelectObject(g.dc, oldFont);
++			DeleteObject(font);
++		}
++		if (para.runs.empty()) {
++			penY += lineH;
++		}
++	}
++	GdiFlush();
++
++	/* 白字黑底 → 用 run 颜色着色（此处整块统一取首个 run 的颜色，M0 简化） */
++	uint32_t color = 0xFF000000u;
++	bool got = false;
++	for (const Para &p : sh.paras) {
++		for (const Run &r : p.runs) {
++			if (r.color.valid) {
++				color = r.color.argb;
++				got = true;
++				break;
++			}
++		}
++		if (got) {
++			break;
++		}
++	}
++	out.assign((size_t)boxW * boxH * 4, 0);
++	const uint8_t cr = (uint8_t)((color >> 16) & 0xFF), cg = (uint8_t)((color >> 8) & 0xFF), cb = (uint8_t)(color & 0xFF);
++	bool any = false;
++	for (size_t i = 0; i < (size_t)boxW * boxH; i++) {
++		const uint8_t *s = g.bits + i * 4;
++		const uint8_t lum = std::max(s[0], std::max(s[1], s[2]));
++		if (lum) {
++			any = true;
++		}
++		out[i * 4 + 0] = cb;
++		out[i * 4 + 1] = cg;
++		out[i * 4 + 2] = cr;
++		out[i * 4 + 3] = lum;
++	}
++	outW = boxW;
++	outH = boxH;
++	return any;
++}
++
++void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, int dx, int dy, RenderSlide &out)
++{
++	const int x = dx + (int)std::lround(sh.x * scale);
++	const int y = dy + (int)std::lround(sh.y * scale);
++	const int w = std::max(1, (int)std::lround(sh.w * scale));
++	const int h = std::max(1, (int)std::lround(sh.h * scale));
++
++	if (sh.kind == Shape::Kind::Group) {
++		for (const Shape &c : sh.children) {
++			AddShape(c, deck, scale, ptScale, x, y, out);
++		}
++		return;
++	}
++	if (sh.kind == Shape::Kind::Picture) {
++		Item it;
++		it.kind = ItemKind::Picture;
++		it.x = x;
++		it.y = y;
++		it.w = w;
++		it.h = h;
++		it.rot60k = (int)sh.rot;
++		it.pix = sh.imageData;
++		it.ext = sh.imageExt;
++		it.debug = sh.name;
++		out.items.push_back(std::move(it));
++		return;
++	}
++	if (sh.hasFill) {
++		Item it;
++		it.kind = ItemKind::Rect;
++		it.x = x;
++		it.y = y;
++		it.w = w;
++		it.h = h;
++		it.color = sh.fill.argb;
++		it.rot60k = (int)sh.rot;
++		it.debug = sh.name;
++		out.items.push_back(std::move(it));
++	}
++	if (sh.kind == Shape::Kind::Table) {
++		Item it;
++		it.kind = ItemKind::Table;
++		it.x = x;
++		it.y = y;
++		it.w = w;
++		it.h = h;
++		it.debug = sh.name;
++		out.items.push_back(std::move(it));
++		return;
++	}
++	bool hasText = false;
++	for (const Para &p : sh.paras) {
++		if (!p.runs.empty()) {
++			hasText = true;
++			break;
++		}
++	}
++	if (hasText) {
++		Item it;
++		it.kind = ItemKind::Text;
++		it.x = x;
++		it.y = y;
++		it.w = w;
++		it.h = h;
++		it.rot60k = (int)sh.rot;
++		it.debug = sh.name;
++		int tw = 0, th = 0;
++		if (RasterizeText(sh, deck, scale, ptScale, it.pix, tw, th)) {
++			it.texW = tw;
++			it.texH = th;
++			it.w = tw;
++			it.h = th;
++			out.items.push_back(std::move(it));
++		}
++	}
++}
++
++} // namespace
++
++bool BuildSlide(const Deck &deck, int slideIndex, int targetW, int targetH, RenderSlide &out, std::wstring &err)
++{
++	if (slideIndex < 0 || slideIndex >= (int)deck.slides.size()) {
++		err = L"页码超出范围";
++		return false;
++	}
++	if (deck.slideW <= 0 || deck.slideH <= 0) {
++		err = L"页面尺寸无效";
++		return false;
++	}
++	out.items.clear();
++	out.width = targetW;
++	out.height = targetH;
++	const double scaleX = (double)targetW / (double)deck.slideW;
++	const double scaleY = (double)targetH / (double)deck.slideH;
++	const double scale = std::min(scaleX, scaleY);
++	/* 字号缩放：幻灯片高度换算为"磅"，pt → 像素 */
++	const double slidePtH = (double)deck.slideH / 12700.0;
++	const double ptScale = (slidePtH > 1.0) ? ((double)targetH / slidePtH) : 1.0;
++	const int contentW = (int)std::lround(deck.slideW * scale);
++	const int contentH = (int)std::lround(deck.slideH * scale);
++	const int dx = (targetW - contentW) / 2;
++	const int dy = (targetH - contentH) / 2;
++
++	for (const Shape &sh : deck.slides[(size_t)slideIndex].shapes) {
++		AddShape(sh, deck, scale, ptScale, dx, dy, out);
++	}
++	return true;
++}
++
++static void BlendPixel(std::vector<uint8_t> &dst, int W, int x, int y, uint32_t color, uint8_t a)
++{
++	if (x < 0 || y < 0 || x >= W) {
++		return;
++	}
++	const size_t idx = ((size_t)y * W + (size_t)x) * 4;
++	if (idx + 3 >= dst.size()) {
++		return;
++	}
++	const uint8_t sr = (uint8_t)((color >> 16) & 0xFF), sg = (uint8_t)((color >> 8) & 0xFF), sb = (uint8_t)(color & 0xFF);
++	const int ia = 255 - a;
++	dst[idx + 0] = (uint8_t)((sb * a + dst[idx + 0] * ia) / 255);
++	dst[idx + 1] = (uint8_t)((sg * a + dst[idx + 1] * ia) / 255);
++	dst[idx + 2] = (uint8_t)((sr * a + dst[idx + 2] * ia) / 255);
++	dst[idx + 3] = 255;
++}
++
++void CompositeToBgra(const RenderSlide &slide, std::vector<uint8_t> &bgra)
++{
++	const int W = slide.width, H = slide.height;
++	bgra.assign((size_t)W * H * 4, 0xFF); /* 白底（BGRA=255,255,255,255） */
++	for (const Item &it : slide.items) {
++		if (it.kind == ItemKind::Rect) {
++			for (int y = it.y; y < it.y + it.h; y++) {
++				for (int x = it.x; x < it.x + it.w; x++) {
++					BlendPixel(bgra, W, x, y, it.color, 255);
++				}
++			}
++		} else if (it.kind == ItemKind::Picture || it.kind == ItemKind::Table) {
++			/* 预览中占位：浅灰 */
++			for (int y = it.y; y < it.y + it.h; y++) {
++				for (int x = it.x; x < it.x + it.w; x++) {
++					if ((x - it.x) % 8 == 0 || (y - it.y) % 8 == 0) {
++						BlendPixel(bgra, W, x, y, 0xFFBFBFBF, 255);
++					}
++				}
++			}
++		} else if (it.kind == ItemKind::Text) {
++			for (int y = 0; y < it.texH; y++) {
++				for (int x = 0; x < it.texW; x++) {
++					const size_t si = ((size_t)y * it.texW + (size_t)x) * 4;
++					const uint8_t a = it.pix[si + 3];
++					if (!a) {
++						continue;
++					}
++					const uint32_t c = 0xFF000000u | ((uint32_t)it.pix[si + 2] << 16) | ((uint32_t)it.pix[si + 1] << 8) |
++							   (uint32_t)it.pix[si + 0];
++					BlendPixel(bgra, W, it.x + x, it.y + y, c, a);
++				}
++			}
++		}
++	}
++}
++
++bool WriteBmp32(const std::wstring &path, int w, int h, const std::vector<uint8_t> &bgra)
++{
++	FILE *f = nullptr;
++	if (_wfopen_s(&f, path.c_str(), L"wb") != 0 || !f) {
++		return false;
++	}
++	const uint32_t imgSize = (uint32_t)w * 4u * (uint32_t)h;
++	const uint32_t fileSize = 54 + imgSize;
++	uint8_t hdr[54];
++	memset(hdr, 0, sizeof(hdr));
++	hdr[0] = 'B';
++	hdr[1] = 'M';
++	memcpy(hdr + 2, &fileSize, 4);
++	uint32_t off = 54;
++	memcpy(hdr + 10, &off, 4);
++	uint32_t hdrSize = 40;
++	memcpy(hdr + 14, &hdrSize, 4);
++	memcpy(hdr + 18, &w, 4);
++	/* 负高度 = 自顶向下存储（我们的缓冲区就是自顶向下） */
++	const int32_t nh = -h;
++	memcpy(hdr + 22, &nh, 4);
++	uint16_t planes = 1, bpp = 32;
++	memcpy(hdr + 26, &planes, 2);
++	memcpy(hdr + 28, &bpp, 2);
++	memcpy(hdr + 34, &imgSize, 4);
++	fwrite(hdr, 1, 54, f);
++	fwrite(bgra.data(), 1, imgSize, f);
++	fclose(f);
++	return true;
++}
++
++} // namespace hfr
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRDeckRender.hpp b/frontend/widgets/HFRDeckRender.hpp
+new file mode 100644
+index 0000000..fd50989
+--- /dev/null
++++ b/frontend/widgets/HFRDeckRender.hpp
+@@ -0,0 +1,39 @@
++#pragma once
++/* HFRDeckRender —— 自研引擎 M0 渲染层（CPU 光栅化，供 OBS 纹理上传与离线预览共用）
++ * 只依赖 HFRDeck 模型与 Win32 GDI，不依赖 OBS/Qt。 */
++#include "HFRDeck.hpp"
++
++#include <cstdint>
++#include <string>
++#include <vector>
++
++namespace hfr {
++
++enum class ItemKind { Rect, Picture, Text, Table };
++
++struct Item {
++	ItemKind kind = ItemKind::Rect;
++	int x = 0, y = 0, w = 0, h = 0;        /* 目标空间像素 */
++	int rot60k = 0;                        /* 1/60000 度 */
++	uint32_t color = 0xFF000000u;          /* Rect 用 */
++	std::vector<uint8_t> pix;              /* Text: BGRA 块；Picture: 原始编码字节 */
++	int texW = 0, texH = 0;                /* Text: 块尺寸 */
++	std::wstring ext;                      /* Picture: 扩展名 */
++	std::wstring debug;                    /* 便于排障：形状名/文本摘要 */
++};
++
++struct RenderSlide {
++	int width = 0, height = 0;
++	std::vector<Item> items;
++};
++
++/* 把第 slideIndex 页构建为可渲染项（EMU → 目标像素；文本在 CPU 上光栅化） */
++bool BuildSlide(const Deck &deck, int slideIndex, int targetW, int targetH, RenderSlide &out, std::wstring &err);
++
++/* 离线合成预览（白底；图片以浅灰占位），用于不经 OBS 的视觉验证 */
++void CompositeToBgra(const RenderSlide &slide, std::vector<uint8_t> &bgra);
++
++/* 写出 32 位 BMP（BGRA，自顶向下） */
++bool WriteBmp32(const std::wstring &path, int w, int h, const std::vector<uint8_t> &bgra);
++
++} // namespace hfr
+-- 
+2.56.0.windows.2
+
