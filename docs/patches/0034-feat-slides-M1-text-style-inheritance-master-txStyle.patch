@@ -1,7 +1,7 @@
 From 7a5834cd39fbfee20a54419c47110f080beb3c5a Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 9 Oct 2026 23:33:09 +0800
-Subject: [PATCH 34/34] feat(slides): M1 text-style inheritance (master
+Subject: [PATCH 34/36] feat(slides): M1 text-style inheritance (master
  txStyles, bullets, indent) + placeholder geometry fallback chain + BMP/PDF
  reference comparison harness
 

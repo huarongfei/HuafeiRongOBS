@@ -1,0 +1,693 @@
+From f3939e26c0cd5fd6ae1b4771a3d65dd2cbb090bf Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 9 Oct 2026 23:59:27 +0800
+Subject: [PATCH 36/36] feat(slides): real-time animation timeline - parse
+ p:timing click sequence, per-frame easing (fade/wipe/fly/zoom/exit/emphasis),
+ property controls
+
+---
+ frontend/widgets/HFRDeck.cpp         | 145 +++++++++++++++
+ frontend/widgets/HFRDeck.hpp         |  15 ++
+ frontend/widgets/HFRDeckRender.cpp   |  15 +-
+ frontend/widgets/HFRDeckRender.hpp   |   1 +
+ frontend/widgets/HFRSlidesSource.cpp | 265 ++++++++++++++++++++++++++-
+ frontend/widgets/HFRSlidesSource.hpp |  20 ++
+ 6 files changed, 449 insertions(+), 12 deletions(-)
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index efecb75..c8e88cd 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -645,6 +645,134 @@ void ParseTxStyles(const XNode &masterRoot, Deck &deck, const std::map<std::wstr
+ 	}
+ }
+ 
++/* 递归收集一个 cTn 子树内的行为（p:cBhvr）：得到目标形状、效果类型与时长 */
++void CollectBehaviors(const XNode *node, Slide &slide, double inheritedDurMs)
++{
++	if (!node) {
++		return;
++	}
++	const std::wstring ln = XNode::LocalName(node->name);
++	if (ln == L"cBhvr") {
++		Anim a;
++		a.durMs = inheritedDurMs;
++		const XNode *bcTn = node->Child(L"cTn");
++		if (bcTn) {
++			a.durMs = ToD(bcTn->Attr(L"dur"), inheritedDurMs);
++			if (const XNode *sc = bcTn->Child(L"stCondLst")) {
++				if (const XNode *c0 = sc->Child(L"cond")) {
++					a.delayMs = ToD(c0->Attr(L"delay"), 0.0);
++				}
++			}
++		}
++		if (const XNode *tgt = node->Child(L"tgtEl")) {
++			if (const XNode *sp = tgt->Child(L"spTgt")) {
++				if (const std::wstring *spid = sp->Attr(L"spid")) {
++					a.shapeId = (int)_wtoi(spid->c_str());
++				}
++			}
++		}
++		/* 效果类型 */
++		for (const XNode &k : node->kids) {
++			const std::wstring kn = XNode::LocalName(k.name);
++			if (kn == L"animEffect") {
++				if (const std::wstring *t = k.Attr(L"transition")) {
++					a.transition = *t;
++				}
++				if (const std::wstring *f = k.Attr(L"filter")) {
++					a.filter = *f;
++				}
++			} else if (kn == L"anim" || kn == L"set" || kn == L"animMotion" || kn == L"animScale" ||
++				   kn == L"animRot" || kn == L"animClr") {
++				if (const std::wstring *an = k.Attr(L"attrName")) {
++					a.filter = *an;
++				} else if (a.filter.empty()) {
++					a.filter = kn;
++				}
++			}
++			if (kn == L"cTn") {
++				if (const std::wstring *pc = k.Attr(L"presetClass")) {
++					a.presetClass = *pc;
++				}
++				if (const std::wstring *pi = k.Attr(L"presetID")) {
++					a.presetId = (int)_wtoi(pi->c_str());
++				}
++			}
++		}
++		if (a.shapeId > 0 && !slide.animSteps.empty()) {
++			slide.animSteps.back().push_back(a);
++		}
++		/* 继续深入（同一行为里可能嵌套子时间） */
++		if (const XNode *child = node->Child(L"childTnLst")) {
++			CollectBehaviors(child, slide, a.durMs);
++		}
++		return;
++	}
++	/* 记录最近的 dur 上下文 */
++	double dur = inheritedDurMs;
++	if (ln == L"cTn") {
++		dur = ToD(node->Attr(L"dur"), inheritedDurMs);
++		if (const std::wstring *pc = node->Attr(L"presetClass")) {
++			(void)pc;
++		}
++	}
++	for (const XNode &k : node->kids) {
++		CollectBehaviors(&k, slide, dur);
++	}
++}
++
++/* 解析 p:timing → 每个点击步骤一组动画 */
++void ParseTiming(const XNode &slideRoot, Slide &slide)
++{
++	const XNode *timing = slideRoot.Child(L"timing");
++	if (!timing) {
++		return;
++	}
++	const XNode *tnLst = timing->Child(L"tnLst");
++	if (!tnLst) {
++		return;
++	}
++	/* 找到 seq（点击序列） */
++	const XNode *seq = nullptr;
++	{
++		std::vector<const XNode *> stack{tnLst};
++		while (!stack.empty() && !seq) {
++			const XNode *n = stack.back();
++			stack.pop_back();
++			if (XNode::LocalName(n->name) == L"seq") {
++				seq = n;
++				break;
++			}
++			for (const XNode &k : n->kids) {
++				stack.push_back(&k);
++			}
++		}
++	}
++	if (!seq) {
++		return;
++	}
++	const XNode *seqChild = seq->Child(L"cTn") ? seq->Child(L"cTn")->Child(L"childTnLst") : nullptr;
++	if (!seqChild) {
++		return;
++	}
++	/* seqChild 的每个 p:par 子树 = 一步 */
++	for (const XNode &step : seqChild->kids) {
++		const std::wstring sn = XNode::LocalName(step.name);
++		if (sn != L"par") {
++			continue;
++		}
++		slide.animSteps.push_back({});
++		CollectBehaviors(&step, slide, 500.0);
++	}
++	/* 清掉空步骤 */
++	std::vector<std::vector<Anim>> cleaned;
++	for (auto &s : slide.animSteps) {
++		if (!s.empty()) {
++			cleaned.push_back(std::move(s));
++		}
++	}
++	slide.animSteps = std::move(cleaned);
++}
++
+ /* 把样式表应用到幻灯片（占位符或普通文本框） */
+ void ApplyTextStyles(Slide &slide, const Deck &deck)
+ {
+@@ -708,6 +836,9 @@ void ParseShapeCommon(const XNode *node, Shape &sh, const std::map<std::wstring,
+ 			if (const std::wstring *n = cnv->Attr(L"name")) {
+ 				sh.name = *n;
+ 			}
++			if (const std::wstring *idv = cnv->Attr(L"id")) {
++				sh.id = (int)_wtoi(idv->c_str());
++			}
+ 		}
+ 		if (const XNode *ph = nv->Child(L"nvPr")) {
+ 			if (const XNode *p = ph->Child(L"ph")) {
+@@ -1280,6 +1411,20 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 			}
+ 		}
+ 		ApplyTextStyles(slide, out);
++		/* 动画（p:timing） */
++		ParseTiming(root, slide);
++		for (auto &step : slide.animSteps) {
++			for (Anim &a : step) {
++				for (size_t si = 0; si < slide.shapes.size(); si++) {
++					if (slide.shapes[si].id == a.shapeId) {
++						a.shapeIndex = (int)si;
++						break;
++					}
++				}
++			}
++		}
++		out.debugInfo += L"slide" + std::to_wstring(out.slides.size() + 1) + L": animSteps=" +
++				 std::to_wstring(slide.animSteps.size()) + L"\n";
+ 		out.slides.push_back(std::move(slide));
+ 	}
+ 
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+index 75cc7ea..ddac643 100644
+--- a/frontend/widgets/HFRDeck.hpp
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -48,9 +48,22 @@ struct Para {
+ 	double lineSpacing = 1.0;
+ };
+ 
++/* 一个动画效果（来自 p:timing） */
++struct Anim {
++	int shapeId = 0;             /* 目标形状 id（p:cNvPr@id） */
++	int shapeIndex = -1;         /* 解析后映射到 shapes 下标 */
++	std::wstring presetClass;    /* entr / exit / emph / path */
++	int presetId = 0;
++	std::wstring filter;         /* fade / wipe(...) / ... */
++	std::wstring transition;     /* in / out */
++	double durMs = 500.0;
++	double delayMs = 0.0;
++};
++
+ struct Shape {
+ 	enum class Kind { Unknown, AutoShape, TextBox, Placeholder, Picture, Group, Table, Chart, Media };
+ 	Kind kind = Kind::Unknown;
++	int id = 0;                  /* p:cNvPr@id */
+ 	std::wstring name;
+ 	int64_t x = 0, y = 0, w = 0, h = 0; /* EMU */
+ 	int64_t rot = 0;                    /* 1/60000 度 */
+@@ -74,6 +87,8 @@ struct Shape {
+ struct Slide {
+ 	std::vector<Shape> shapes;
+ 	std::wstring notes;
++	/* 动画步骤：外层 vector = 每次"点击"推进的一步 */
++	std::vector<std::vector<Anim>> animSteps;
+ };
+ 
+ struct Deck {
+diff --git a/frontend/widgets/HFRDeckRender.cpp b/frontend/widgets/HFRDeckRender.cpp
+index da19df6..da9a6fe 100644
+--- a/frontend/widgets/HFRDeckRender.cpp
++++ b/frontend/widgets/HFRDeckRender.cpp
+@@ -235,7 +235,8 @@ bool RasterizeText(const Shape &sh, const Deck &deck, double scale, double ptSca
+ 	return any;
+ }
+ 
+-void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, int dx, int dy, RenderSlide &out)
++void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, int dx, int dy, int shapeIndex,
++	       RenderSlide &out)
+ {
+ 	const int x = dx + (int)std::lround(sh.x * scale);
+ 	const int y = dy + (int)std::lround(sh.y * scale);
+@@ -244,7 +245,7 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 
+ 	if (sh.kind == Shape::Kind::Group) {
+ 		for (const Shape &c : sh.children) {
+-			AddShape(c, deck, scale, ptScale, x, y, out);
++			AddShape(c, deck, scale, ptScale, x, y, shapeIndex, out);
+ 		}
+ 		return;
+ 	}
+@@ -259,6 +260,7 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		it.pix = sh.imageData;
+ 		it.ext = sh.imageExt;
+ 		it.debug = sh.name;
++		it.shapeIndex = shapeIndex;
+ 		out.items.push_back(std::move(it));
+ 		return;
+ 	}
+@@ -270,8 +272,10 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		it.w = w;
+ 		it.h = h;
+ 		it.color = sh.fill.argb;
++		it.shapeIndex = shapeIndex;
+ 		it.rot60k = (int)sh.rot;
+ 		it.debug = sh.name;
++		it.shapeIndex = shapeIndex;
+ 		out.items.push_back(std::move(it));
+ 	}
+ 	if (sh.kind == Shape::Kind::Table) {
+@@ -282,6 +286,7 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		it.w = w;
+ 		it.h = h;
+ 		it.debug = sh.name;
++		it.shapeIndex = shapeIndex;
+ 		out.items.push_back(std::move(it));
+ 		return;
+ 	}
+@@ -301,6 +306,7 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		it.h = h;
+ 		it.rot60k = (int)sh.rot;
+ 		it.debug = sh.name;
++		it.shapeIndex = shapeIndex;
+ 		int tw = 0, th = 0;
+ 		if (RasterizeText(sh, deck, scale, ptScale, it.pix, tw, th)) {
+ 			it.texW = tw;
+@@ -338,8 +344,9 @@ bool BuildSlide(const Deck &deck, int slideIndex, int targetW, int targetH, Rend
+ 	const int dx = (targetW - contentW) / 2;
+ 	const int dy = (targetH - contentH) / 2;
+ 
+-	for (const Shape &sh : deck.slides[(size_t)slideIndex].shapes) {
+-		AddShape(sh, deck, scale, ptScale, dx, dy, out);
++	const std::vector<Shape> &shapes = deck.slides[(size_t)slideIndex].shapes;
++	for (size_t si = 0; si < shapes.size(); si++) {
++		AddShape(shapes[si], deck, scale, ptScale, dx, dy, (int)si, out);
+ 	}
+ 	return true;
+ }
+diff --git a/frontend/widgets/HFRDeckRender.hpp b/frontend/widgets/HFRDeckRender.hpp
+index fd50989..00e66ef 100644
+--- a/frontend/widgets/HFRDeckRender.hpp
++++ b/frontend/widgets/HFRDeckRender.hpp
+@@ -15,6 +15,7 @@ struct Item {
+ 	ItemKind kind = ItemKind::Rect;
+ 	int x = 0, y = 0, w = 0, h = 0;        /* 目标空间像素 */
+ 	int rot60k = 0;                        /* 1/60000 度 */
++	int shapeIndex = -1;                   /* 来源形状下标（动画用） */
+ 	uint32_t color = 0xFF000000u;          /* Rect 用 */
+ 	std::vector<uint8_t> pix;              /* Text: BGRA 块；Picture: 原始编码字节 */
+ 	int texW = 0, texH = 0;                /* Text: 块尺寸 */
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+index 83a8d59..897063e 100644
+--- a/frontend/widgets/HFRSlidesSource.cpp
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -1,5 +1,11 @@
+ #include "HFRSlidesSource.hpp"
+ 
++#ifndef NOMINMAX
++#define NOMINMAX
++#endif
++
++#include <algorithm>
++
+ #include "HFRPpt.hpp" /* 复用 HfrPptTestOutputDir()/缓存目录 */
+ 
+ #include <obs-module.h>
+@@ -9,8 +15,13 @@
+ #include <QFile>
+ #include <QFileInfo>
+ 
++#include <cmath>
+ #include <cstring>
+ 
++/* 前置声明（属性面板按钮会用到） */
++static int step_count(HfrSlidesCtx *ctx);
++static void start_step_anim(HfrSlidesCtx *ctx);
++
+ /* ============================ 来源实现 ============================ */
+ 
+ static const char *hfr_slides_get_name(void *)
+@@ -35,6 +46,16 @@ static void hfr_slides_destroy_gpu(HfrSlidesCtx *ctx)
+ }
+ 
+ /* UI 线程：解析 + CPU 光栅化 */
++static void hfr_slides_reset_timeline(HfrSlidesCtx *ctx)
++{
++	if (ctx) {
++		ctx->animStep = 0;
++		ctx->animating = false;
++		ctx->animStartNs = 0;
++		ctx->animDurationMs = 0.0;
++	}
++}
++
+ static void hfr_slides_rebuild(HfrSlidesCtx *ctx)
+ {
+ 	if (!ctx) {
+@@ -95,6 +116,7 @@ static void hfr_slides_update(void *data, obs_data_t *settings)
+ 		}
+ 		if (hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
+ 			ctx->needUpload = true;
++			hfr_slides_reset_timeline(ctx);
+ 		} else {
+ 			ctx->lastError = err;
+ 		}
+@@ -145,6 +167,7 @@ static void hfr_slides_upload(HfrSlidesCtx *ctx)
+ 		g.w = it.w;
+ 		g.h = it.h;
+ 		g.rot60k = it.rot60k;
++		g.shapeIndex = it.shapeIndex;
+ 		if (it.kind == hfr::ItemKind::Rect) {
+ 			uint32_t px = it.color;
+ 			g.tex = gs_texture_create(1, 1, GS_BGRA, 1, (const uint8_t **)&px, 0);
+@@ -191,24 +214,37 @@ static void hfr_slides_render(void *data, gs_effect_t *)
+ 	gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+ 	gs_technique_t *tech = gs_effect_get_technique(eff, "Draw");
+ 	gs_eparam_t *img = gs_effect_get_param_by_name(eff, "image");
++	gs_eparam_t *mul = gs_effect_get_param_by_name(eff, "multiplier");
+ 	gs_technique_begin(tech);
+ 	for (const HfrSlidesGpuItem &it : ctx->gpu) {
+-		if (!it.tex) {
++		if (!it.tex || it.alpha <= 0.001f) {
+ 			continue;
+ 		}
+ 		gs_technique_begin_pass(tech, 0);
+ 		gs_effect_set_texture(img, it.tex);
++		if (mul) {
++			gs_effect_set_float(mul, it.alpha);
++		}
+ 		gs_matrix_push();
+-		gs_matrix_translate3f((float)it.x, (float)it.y, 0.0f);
+-		if (it.rot60k) {
+-			const float deg = (float)it.rot60k / 60000.0f;
+-			gs_matrix_translate3f((float)it.w / 2.0f, (float)it.h / 2.0f, 0.0f);
+-			gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, deg * 3.14159265f / 180.0f);
+-			gs_matrix_translate3f(-(float)it.w / 2.0f, -(float)it.h / 2.0f, 0.0f);
++		gs_matrix_translate3f((float)it.x + it.dx, (float)it.y + it.dy, 0.0f);
++		if (it.scale != 1.0f || it.rot60k) {
++			const float cx = (float)it.w / 2.0f, cy = (float)it.h / 2.0f;
++			gs_matrix_translate3f(cx, cy, 0.0f);
++			if (it.rot60k) {
++				const float deg = (float)it.rot60k / 60000.0f;
++				gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, deg * 3.14159265f / 180.0f);
++			}
++			if (it.scale != 1.0f) {
++				gs_matrix_scale3f(it.scale, it.scale, 1.0f);
++			}
++			gs_matrix_translate3f(-cx, -cy, 0.0f);
+ 		}
+ 		gs_draw_sprite(it.tex, 0, (uint32_t)it.w, (uint32_t)it.h);
+ 		gs_matrix_pop();
+ 		gs_technique_end_pass(tech);
++		if (mul) {
++			gs_effect_set_float(mul, 1.0f);
++		}
+ 	}
+ 	gs_technique_end(tech);
+ }
+@@ -253,6 +289,36 @@ static obs_properties_t *hfr_slides_properties(void *data)
+ 		}
+ 		return true;
+ 	}, data);
++	obs_properties_add_button2(props, "hfr_slides_anim_next", "▶ 下一步动画（点击/翻页）",
++				   [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c) {
++			const int total = step_count(c);
++			if (c->animStep < total) {
++				c->animStep++;
++				start_step_anim(c);
++			}
++		}
++		return true;
++	}, data);
++	obs_properties_add_button2(props, "hfr_slides_anim_prev", "◀ 上一步动画",
++				   [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c && c->animStep > 0) {
++			c->animStep--;
++			c->animating = false;
++		}
++		return true;
++	}, data);
++	obs_properties_add_button2(props, "hfr_slides_anim_reset", "⟲ 重置动画",
++				   [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c) {
++			c->animStep = 0;
++			c->animating = false;
++		}
++		return true;
++	}, data);
+ 	obs_properties_add_button2(props, "hfr_slides_reload", "重新载入文件", [](obs_properties_t *, obs_property_t *, void *data) {
+ 		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
+ 		if (c) {
+@@ -278,7 +344,110 @@ static void *hfr_slides_create(obs_data_t *settings, obs_source_t *source)
+ 	return ctx;
+ }
+ 
+-static void hfr_slides_tick(void *, float) {}
++/* 缓动（近似 PowerPoint 的平滑进入） */
++static float EaseOut(float p)
++{
++	if (p <= 0.0f) {
++		return 0.0f;
++	}
++	if (p >= 1.0f) {
++		return 1.0f;
++	}
++	return 1.0f - (1.0f - p) * (1.0f - p);
++}
++
++/* 取某形状在某步的初始/最终表现，并按进度插值（图形线程：只算数学） */
++static void EvalItemAnim(HfrSlidesCtx *ctx, HfrSlidesGpuItem &it, uint64_t nowNs)
++{
++	it.alpha = 1.0f;
++	it.dx = 0.0f;
++	it.dy = 0.0f;
++	it.scale = 1.0f;
++	if (!ctx->loaded || ctx->slide.items.empty()) {
++		return;
++	}
++	const std::vector<std::vector<hfr::Anim>> &steps = ctx->deck.slides[(size_t)ctx->page].animSteps;
++	if (steps.empty()) {
++		return;
++	}
++	/* 只看本项所属形状相关的动画 */
++	for (size_t si = 0; si < steps.size(); si++) {
++		for (const hfr::Anim &a : steps[si]) {
++			if (a.shapeIndex != it.shapeIndex) {
++				continue;
++			}
++			const bool done = ((int)si < ctx->animStep);
++			const bool current = ((int)si == ctx->animStep) && ctx->animating;
++			const bool isExit = (a.presetClass == L"exit");
++			const bool isEmph = (a.presetClass == L"emph");
++			const std::wstring &f = a.filter;
++
++			float p = 0.0f;
++			if (done) {
++				p = 1.0f;
++			} else if (current) {
++				const double elapsedMs = (double)(nowNs - ctx->animStartNs) / 1000000.0 - a.delayMs;
++				const double dur = (a.durMs > 1.0) ? a.durMs : 500.0;
++				p = (float)(elapsedMs / dur);
++				if (p < 0.0f) {
++					p = 0.0f;
++				}
++				if (p > 1.0f) {
++					p = 1.0f;
++				}
++			} else {
++				/* 尚未轮到：进入类效果保持"未出现"，退出类保持"在场" */
++				p = isExit ? 0.0f : 0.0f;
++			}
++			const float e = EaseOut(p);
++
++			if (isEmph) {
++				it.scale = 1.0f + 0.25f * (float)sin(p * 3.14159265);
++				continue;
++			}
++			if (isExit) {
++				it.alpha = 1.0f - e;
++				continue;
++			}
++			/* 进入类 */
++			if (f.find(L"fade") != std::wstring::npos || f.empty() || a.presetId == 10) {
++				it.alpha = e;
++			} else if (f.find(L"wipe") != std::wstring::npos) {
++				/* 近似：横向展开 + 淡入 */
++				it.scale = 1.0f;
++				it.dx = (float)((1.0 - e) * -40.0);
++				it.alpha = e;
++			} else if (f.find(L"slide") != std::wstring::npos || f.find(L"fly") != std::wstring::npos ||
++				   f.find(L"ppt_") != std::wstring::npos || a.presetId == 2) {
++				it.dx = (float)((1.0 - e) * -300.0);
++				it.alpha = e;
++			} else if (f.find(L"zoom") != std::wstring::npos || a.presetId == 23) {
++				it.scale = 0.4f + 0.6f * e;
++				it.alpha = e;
++			} else {
++				it.alpha = e;
++			}
++		}
++	}
++}
++
++static void hfr_slides_tick(void *data, float)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	if (!ctx) {
++		return;
++	}
++	const uint64_t now = os_gettime_ns();
++	if (ctx->animating) {
++		const double elapsedMs = (double)(now - ctx->animStartNs) / 1000000.0;
++		if (elapsedMs >= ctx->animDurationMs) {
++			ctx->animating = false;
++		}
++	}
++	for (HfrSlidesGpuItem &it : ctx->gpu) {
++		EvalItemAnim(ctx, it, now);
++	}
++}
+ 
+ bool HfrRegisterSlidesSource()
+ {
+@@ -369,6 +538,86 @@ static bool hfr_find_slides_cb(void *param, obs_source_t *src)
+ 	return true;
+ }
+ 
++/* ---------------- 动画控制 ---------------- */
++static int step_count(HfrSlidesCtx *ctx)
++{
++	if (!ctx || ctx->deck.slides.empty() || ctx->page >= (int)ctx->deck.slides.size()) {
++		return 0;
++	}
++	return (int)ctx->deck.slides[(size_t)ctx->page].animSteps.size();
++}
++
++static void start_step_anim(HfrSlidesCtx *ctx)
++{
++	if (!ctx) {
++		return;
++	}
++	/* 本步内最长时长决定动画何时结束 */
++	double dur = 0.0;
++	if (ctx->page < (int)ctx->deck.slides.size()) {
++		const auto &steps = ctx->deck.slides[(size_t)ctx->page].animSteps;
++		if (ctx->animStep >= 0 && ctx->animStep < (int)steps.size()) {
++			for (const hfr::Anim &a : steps[(size_t)ctx->animStep]) {
++				dur = std::max(dur, a.delayMs + a.durMs);
++			}
++		}
++	}
++	ctx->animDurationMs = (dur > 0.0) ? dur : 0.0;
++	ctx->animStartNs = os_gettime_ns();
++	ctx->animating = (ctx->animDurationMs > 0.0);
++}
++
++int HfrSlidesAnimStep(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	return ctx ? ctx->animStep : -1;
++}
++
++int HfrSlidesAnimStepCount(obs_source_t *src)
++{
++	return step_count(ctx_of(src));
++}
++
++bool HfrSlidesNextAnim(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx) {
++		return false;
++	}
++	const int total = step_count(ctx);
++	if (ctx->animStep >= total) {
++		return false;
++	}
++	ctx->animStep++;
++	start_step_anim(ctx);
++	blog(LOG_INFO, "[HFR-SLIDES] 动画步进 %d/%d", ctx->animStep, total);
++	return true;
++}
++
++bool HfrSlidesPrevAnim(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx) {
++		return false;
++	}
++	if (ctx->animStep <= 0) {
++		return false;
++	}
++	ctx->animStep--;
++	ctx->animating = false;
++	return true;
++}
++
++void HfrSlidesResetAnim(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx) {
++		return;
++	}
++	ctx->animStep = 0;
++	ctx->animating = false;
++}
++
+ obs_source_t *HfrFindFirstSlidesSource()
+ {
+ 	obs_source_t *found = nullptr;
+diff --git a/frontend/widgets/HFRSlidesSource.hpp b/frontend/widgets/HFRSlidesSource.hpp
+index 048fd74..b4469cb 100644
+--- a/frontend/widgets/HFRSlidesSource.hpp
++++ b/frontend/widgets/HFRSlidesSource.hpp
+@@ -16,6 +16,12 @@ struct HfrSlidesGpuItem {
+ 	hfr::ItemKind kind = hfr::ItemKind::Rect;
+ 	int x = 0, y = 0, w = 0, h = 0;
+ 	int rot60k = 0;
++	int shapeIndex = -1;
++	/* 每帧动画求值结果 */
++	float alpha = 1.0f;
++	float dx = 0.0f;
++	float dy = 0.0f;
++	float scale = 1.0f;
+ 	gs_texture_t *tex = nullptr;   /* Rect/Text/Picture 都走纹理 */
+ 	std::string tmpPath;           /* Picture 的临时文件（供 gs_texture_create_from_file） */
+ };
+@@ -31,6 +37,13 @@ struct HfrSlidesCtx {
+ 	bool needUpload = false;     /* 图形线程：需要上传纹理 */
+ 	std::wstring lastError;
+ 	std::vector<HfrSlidesGpuItem> gpu;
++
++	/* —— 动画时间轴 —— */
++	int animStep = 0;            /* 已完成的动画步数 */
++	bool animating = false;
++	uint64_t animStartNs = 0;
++	/* 一步内的最大时长（毫秒），用于判断动画是否结束 */
++	double animDurationMs = 0.0;
+ };
+ 
+ /* 注册来源类型（来源→+ 里可见） */
+@@ -42,3 +55,10 @@ void HfrSlidesSetPage(obs_source_t *src, int page);
+ int HfrSlidesPage(obs_source_t *src);
+ int HfrSlidesPageCount(obs_source_t *src);
+ obs_source_t *HfrFindFirstSlidesSource();
++
++/* 动画控制（UI 线程调用） */
++int HfrSlidesAnimStep(obs_source_t *src);      /* 已完成的步数 */
++int HfrSlidesAnimStepCount(obs_source_t *src); /* 总步数 */
++bool HfrSlidesNextAnim(obs_source_t *src);     /* 推进一步动画（无则返回 false） */
++bool HfrSlidesPrevAnim(obs_source_t *src);
++void HfrSlidesResetAnim(obs_source_t *src);
+-- 
+2.56.0.windows.2
+

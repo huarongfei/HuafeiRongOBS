@@ -1,0 +1,593 @@
+From 863ef458e6446e0a17d1842b45ec6935ca02e7ff Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 9 Oct 2026 23:55:41 +0800
+Subject: [PATCH 35/36] feat(slides): wire self-developed engine into OBS as
+ source hfr_slides_source (GPU draw, rotation, textures; zlib linked)
+
+---
+ frontend/cmake/ui-widgets.cmake      |  15 +-
+ frontend/widgets/HFRDeck.cpp         |  29 ++-
+ frontend/widgets/HFRSlidesSource.cpp | 377 +++++++++++++++++++++++++++
+ frontend/widgets/HFRSlidesSource.hpp |  44 ++++
+ frontend/widgets/OBSBasic.cpp        |   2 +
+ 5 files changed, 457 insertions(+), 10 deletions(-)
+ create mode 100644 frontend/widgets/HFRSlidesSource.cpp
+ create mode 100644 frontend/widgets/HFRSlidesSource.hpp
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index 0b146dc..3948cce 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -65,6 +65,12 @@ target_sources(
+     widgets/HFRPptSource.hpp
+     widgets/HFRPresenter.cpp
+     widgets/HFRPresenter.hpp
++    widgets/HFRDeck.cpp
++    widgets/HFRDeck.hpp
++    widgets/HFRDeckRender.cpp
++    widgets/HFRDeckRender.hpp
++    widgets/HFRSlidesSource.cpp
++    widgets/HFRSlidesSource.hpp
+     widgets/StatusBarWidget.cpp
+     widgets/StatusBarWidget.hpp
+ )
+@@ -113,4 +119,11 @@ if(HFR_EMBED_LO)
+   else()
+     message(STATUS "HuafeiRongOBS: HFR_EMBED_LO=ON but runtime not found at ${HFR_LO_RUNTIME_DIR} (skip embedding)")
+   endif()
+-endif()
+\ No newline at end of file
++endif()
++# ---------------------------------------------------------------------------
++# HuafeiRongOBS: 自研 PPT 引擎（HFRDeck）用 zlib 解压 pptx（zip/raw deflate）
++# ---------------------------------------------------------------------------
++find_package(ZLIB REQUIRED)
++if(TARGET ZLIB::ZLIB)
++  target_link_libraries(obs-studio PRIVATE ZLIB::ZLIB)
++endif()
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index 10bcdda..efecb75 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -202,6 +202,18 @@ struct XNode {
+ 	}
+ };
+ 
++/* 宽 → UTF-8（避免 wchar_t→char 的迭代器转换告警/截断） */
++std::string Narrow(const std::wstring &w)
++{
++	if (w.empty()) {
++		return std::string();
++	}
++	const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
++	std::string s((size_t)n, '\0');
++	WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
++	return s;
++}
++
+ std::wstring Utf8ToW(const std::string &s)
+ {
+ 	if (s.empty()) {
+@@ -1031,7 +1043,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 		for (const auto &kv : presRelsAll) {
+ 			if (kv.second.type.find(L"slideMaster") != std::wstring::npos) {
+ 				masterPart = NormalizeTarget("ppt/presentation.xml",
+-							      std::string(kv.second.target.begin(), kv.second.target.end()));
++							      Narrow(kv.second.target));
+ 				break;
+ 			}
+ 		}
+@@ -1098,7 +1110,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 					continue;
+ 				}
+ 				dbgRelHit++;
+-				slideParts.push_back(NormalizeTarget("ppt/presentation.xml", std::string(it->second.begin(), it->second.end())));
++				slideParts.push_back(NormalizeTarget("ppt/presentation.xml", Narrow(it->second)));
+ 			}
+ 		}
+ 	}
+@@ -1151,8 +1163,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 						ParseRelsEx(rr, info);
+ 						for (const auto &kv : info) {
+ 							if (kv.second.type.find(L"slideLayout") != std::wstring::npos) {
+-								layoutPart = NormalizeTarget(part, std::string(kv.second.target.begin(),
+-									    kv.second.target.end()));
++								layoutPart = NormalizeTarget(part, Narrow(kv.second.target));
+ 								break;
+ 							}
+ 						}
+@@ -1172,7 +1183,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 						for (const auto &kv : info) {
+ 							if (kv.second.type.find(L"slideMaster") != std::wstring::npos) {
+ 								const std::string mp = NormalizeTarget(
+-									layoutPart, std::string(kv.second.target.begin(), kv.second.target.end()));
++									layoutPart, Narrow(kv.second.target));
+ 								std::vector<uint8_t> mb;
+ 								if (zip.Read(mp, mb)) {
+ 									CollectPlaceholders(mb, phMap, theme);
+@@ -1257,7 +1268,7 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 			if (it == rels.end()) {
+ 				continue;
+ 			}
+-			const std::string target = NormalizeTarget(part, std::string(it->second.begin(), it->second.end()));
++			const std::string target = NormalizeTarget(part, Narrow(it->second));
+ 			std::vector<uint8_t> img;
+ 			if (zip.Read(target, img)) {
+ 				sh.imageData = std::move(img);
+@@ -1289,7 +1300,7 @@ std::string DeckSummary(const Deck &deck)
+ 	o << "slideSize=" << deck.slideW << "x" << deck.slideH << " EMU ("
+ 	  << (double)deck.slideW / 914400.0 << "in x " << (double)deck.slideH / 914400.0 << "in)\n";
+ 	o << "slides=" << deck.slides.size() << " themeColors=" << deck.themeColors.size() << " majorFont="
+-	  << std::string(deck.majorFont.begin(), deck.majorFont.end()) << "\n";
++	  << Narrow(deck.majorFont) << "\n";
+ 	for (size_t i = 0; i < deck.slides.size(); i++) {
+ 		const Slide &s = deck.slides[i];
+ 		o << "  slide " << (i + 1) << ": shapes=" << s.shapes.size() << "\n";
+@@ -1310,9 +1321,9 @@ std::string DeckSummary(const Deck &deck)
+ 			case Shape::Kind::Media: kind = "media"; break;
+ 			default: kind = "unknown"; break;
+ 			}
+-			o << "    [" << kind << "] geom=" << std::string(sh.prstGeom.begin(), sh.prstGeom.end())
++			o << "    [" << kind << "] geom=" << Narrow(sh.prstGeom)
+ 			  << " pos=(" << sh.x << "," << sh.y << ") size=(" << sh.w << "x" << sh.h << ")"
+-			  << (sh.isPlaceholder ? " ph=" + std::string(sh.phType.begin(), sh.phType.end()) + ":" +
++			  << (sh.isPlaceholder ? " ph=" + Narrow(sh.phType) + ":" +
+ 							std::to_string(sh.phIdx)
+ 					      : std::string())
+ 			  << (sh.hasFill ? " fill=1" : " fill=0")
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+new file mode 100644
+index 0000000..83a8d59
+--- /dev/null
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -0,0 +1,377 @@
++#include "HFRSlidesSource.hpp"
++
++#include "HFRPpt.hpp" /* 复用 HfrPptTestOutputDir()/缓存目录 */
++
++#include <obs-module.h>
++#include <util/platform.h>
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++
++#include <cstring>
++
++/* ============================ 来源实现 ============================ */
++
++static const char *hfr_slides_get_name(void *)
++{
++	return "幻灯片（自研引擎）";
++}
++
++static void hfr_slides_destroy_gpu(HfrSlidesCtx *ctx)
++{
++	if (!ctx) {
++		return;
++	}
++	obs_enter_graphics();
++	for (HfrSlidesGpuItem &it : ctx->gpu) {
++		if (it.tex) {
++			gs_texture_destroy(it.tex);
++			it.tex = nullptr;
++		}
++	}
++	obs_leave_graphics();
++	ctx->gpu.clear();
++}
++
++/* UI 线程：解析 + CPU 光栅化 */
++static void hfr_slides_rebuild(HfrSlidesCtx *ctx)
++{
++	if (!ctx) {
++		return;
++	}
++	ctx->lastError.clear();
++	ctx->deck = hfr::Deck();
++	ctx->slide.items.clear();
++	ctx->loaded = false;
++
++	if (ctx->file.isEmpty()) {
++		ctx->lastError = L"未选择文件";
++		return;
++	}
++	std::wstring err;
++	if (!hfr::LoadDeck(ctx->file.toStdWString(), ctx->deck, err)) {
++		ctx->lastError = err;
++		blog(LOG_WARNING, "[HFR-SLIDES] 解析失败：%ls", err.c_str());
++		return;
++	}
++	if (ctx->page < 0 || ctx->page >= (int)ctx->deck.slides.size()) {
++		ctx->page = 0;
++	}
++	if (!hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
++		ctx->lastError = err;
++		blog(LOG_WARNING, "[HFR-SLIDES] 构建渲染项失败：%ls", err.c_str());
++		return;
++	}
++	ctx->loaded = true;
++	ctx->needUpload = true;
++	blog(LOG_INFO, "[HFR-SLIDES] 已载入 %s：%zu 页，当前第 %d 页，渲染项 %zu", QFileInfo(ctx->file).fileName().toUtf8().constData(),
++	     ctx->deck.slides.size(), ctx->page + 1, ctx->slide.items.size());
++}
++
++static void hfr_slides_update(void *data, obs_data_t *settings)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	if (!ctx) {
++		return;
++	}
++	const char *file = obs_data_get_string(settings, "file");
++	const QString newFile = file ? QString::fromUtf8(file) : QString();
++	const int newPage = (int)obs_data_get_int(settings, "page");
++	const int newW = (int)obs_data_get_int(settings, "width");
++	const int newH = (int)obs_data_get_int(settings, "height");
++
++	const bool fileChanged = (newFile != ctx->file);
++	ctx->file = newFile;
++	ctx->width = (newW > 0) ? newW : 1920;
++	ctx->height = (newH > 0) ? newH : 1080;
++	ctx->page = newPage;
++
++	/* 页变化且已载入：只重光栅化，不重新解析 */
++	if (!fileChanged && ctx->loaded && !ctx->deck.slides.empty()) {
++		std::wstring err;
++		if (ctx->page < 0 || ctx->page >= (int)ctx->deck.slides.size()) {
++			ctx->page = 0;
++		}
++		if (hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
++			ctx->needUpload = true;
++		} else {
++			ctx->lastError = err;
++		}
++		return;
++	}
++	hfr_slides_rebuild(ctx);
++}
++
++static void hfr_slides_destroy(void *data)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	if (!ctx) {
++		return;
++	}
++	hfr_slides_destroy_gpu(ctx);
++	for (const HfrSlidesGpuItem &it : ctx->gpu) {
++		if (!it.tmpPath.empty()) {
++			QFile::remove(QString::fromStdString(it.tmpPath));
++		}
++	}
++	delete ctx;
++}
++
++static uint32_t hfr_slides_get_width(void *data)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	return ctx ? (uint32_t)ctx->width : 0;
++}
++
++static uint32_t hfr_slides_get_height(void *data)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	return ctx ? (uint32_t)ctx->height : 0;
++}
++
++/* 图形线程：上传纹理 */
++static void hfr_slides_upload(HfrSlidesCtx *ctx)
++{
++	hfr_slides_destroy_gpu(ctx);
++	const QString cache = HfrPptCacheDir();
++	/* Rect 用 1x1 纯色纹理；Text 用 BGRA；Picture 写临时文件后用 gs 加载 */
++	obs_enter_graphics();
++	for (const hfr::Item &it : ctx->slide.items) {
++		HfrSlidesGpuItem g;
++		g.kind = it.kind;
++		g.x = it.x;
++		g.y = it.y;
++		g.w = it.w;
++		g.h = it.h;
++		g.rot60k = it.rot60k;
++		if (it.kind == hfr::ItemKind::Rect) {
++			uint32_t px = it.color;
++			g.tex = gs_texture_create(1, 1, GS_BGRA, 1, (const uint8_t **)&px, 0);
++		} else if (it.kind == hfr::ItemKind::Text) {
++			if (!it.pix.empty() && it.texW > 0 && it.texH > 0) {
++				const uint8_t *data = it.pix.data();
++				g.tex = gs_texture_create((uint32_t)it.texW, (uint32_t)it.texH, GS_BGRA, 1, &data, 0);
++			}
++		} else if (it.kind == hfr::ItemKind::Picture) {
++			if (!it.pix.empty()) {
++				QString ext = it.ext.empty() ? QStringLiteral("png") : QString::fromStdWString(it.ext);
++				const QString tmp = cache + QStringLiteral("/img_") + QString::number(ctx->gpu.size()) +
++						    QStringLiteral(".") + ext;
++				QFile f(tmp);
++				if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
++					f.write((const char *)it.pix.data(), (qint64)it.pix.size());
++					f.close();
++					g.tmpPath = tmp.toStdString();
++					g.tex = gs_texture_create_from_file(tmp.toUtf8().constData());
++					QFile::remove(tmp);
++				}
++			}
++		}
++		if (g.tex) {
++			ctx->gpu.push_back(g);
++		}
++	}
++	obs_leave_graphics();
++	ctx->needUpload = false;
++}
++
++static void hfr_slides_render(void *data, gs_effect_t *)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	if (!ctx) {
++		return;
++	}
++	if (ctx->needUpload) {
++		hfr_slides_upload(ctx);
++	}
++	if (ctx->gpu.empty()) {
++		return;
++	}
++	gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
++	gs_technique_t *tech = gs_effect_get_technique(eff, "Draw");
++	gs_eparam_t *img = gs_effect_get_param_by_name(eff, "image");
++	gs_technique_begin(tech);
++	for (const HfrSlidesGpuItem &it : ctx->gpu) {
++		if (!it.tex) {
++			continue;
++		}
++		gs_technique_begin_pass(tech, 0);
++		gs_effect_set_texture(img, it.tex);
++		gs_matrix_push();
++		gs_matrix_translate3f((float)it.x, (float)it.y, 0.0f);
++		if (it.rot60k) {
++			const float deg = (float)it.rot60k / 60000.0f;
++			gs_matrix_translate3f((float)it.w / 2.0f, (float)it.h / 2.0f, 0.0f);
++			gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, deg * 3.14159265f / 180.0f);
++			gs_matrix_translate3f(-(float)it.w / 2.0f, -(float)it.h / 2.0f, 0.0f);
++		}
++		gs_draw_sprite(it.tex, 0, (uint32_t)it.w, (uint32_t)it.h);
++		gs_matrix_pop();
++		gs_technique_end_pass(tech);
++	}
++	gs_technique_end(tech);
++}
++
++/* ---------------- 属性面板 ---------------- */
++static obs_properties_t *hfr_slides_properties(void *data)
++{
++	HfrSlidesCtx *ctx = static_cast<HfrSlidesCtx *>(data);
++	obs_properties_t *props = obs_properties_create();
++
++	obs_properties_add_text(props, "hfr_slides_info",
++				"由 HuafeiRongOBS 自研 PPT 引擎渲染（OOXML 解析 + GPU 绘制），支持实时动画与多画布独立进度。",
++				OBS_TEXT_INFO);
++
++	obs_properties_add_path(props, "file", "演示文稿", OBS_PATH_FILE, "演示文稿 (*.pptx *.ppt *.odp)", nullptr);
++
++	obs_property_t *pageProp = obs_properties_add_int(props, "page", "页码（从 0 开始）", 0, 9999, 1);
++	(void)pageProp;
++
++	obs_properties_add_int(props, "width", "渲染宽度", 160, 7680, 2);
++	obs_properties_add_int(props, "height", "渲染高度", 90, 4320, 2);
++
++	obs_properties_add_button2(props, "hfr_slides_prev", "◀ 上一页", [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c && c->page > 0) {
++			c->page--;
++			std::wstring err;
++			if (hfr::BuildSlide(c->deck, c->page, c->width, c->height, c->slide, err)) {
++				c->needUpload = true;
++			}
++		}
++		return true;
++	}, data);
++	obs_properties_add_button2(props, "hfr_slides_next", "下一页 ▶", [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c && c->page + 1 < (int)c->deck.slides.size()) {
++			c->page++;
++			std::wstring err;
++			if (hfr::BuildSlide(c->deck, c->page, c->width, c->height, c->slide, err)) {
++				c->needUpload = true;
++			}
++		}
++		return true;
++	}, data);
++	obs_properties_add_button2(props, "hfr_slides_reload", "重新载入文件", [](obs_properties_t *, obs_property_t *, void *data) {
++		HfrSlidesCtx *c = static_cast<HfrSlidesCtx *>(data);
++		if (c) {
++			hfr_slides_rebuild(c);
++		}
++		return true;
++	}, data);
++
++	if (ctx && !ctx->lastError.empty()) {
++		const QString msg = QStringLiteral("状态：") + QString::fromWCharArray(ctx->lastError.c_str());
++		obs_properties_add_text(props, "hfr_slides_status", msg.toUtf8().constData(), OBS_TEXT_INFO);
++	}
++	return props;
++}
++
++static void *hfr_slides_create(obs_data_t *settings, obs_source_t *source)
++{
++	HfrSlidesCtx *ctx = new HfrSlidesCtx();
++	ctx->width = 1920;
++	ctx->height = 1080;
++	ctx->file = QString::fromUtf8(obs_data_get_string(settings, "file"));
++	hfr_slides_update(ctx, settings);
++	return ctx;
++}
++
++static void hfr_slides_tick(void *, float) {}
++
++bool HfrRegisterSlidesSource()
++{
++	static bool registered = false;
++	if (registered) {
++		return true;
++	}
++	struct obs_source_info info = {};
++	info.id = "hfr_slides_source";
++	info.type = OBS_SOURCE_TYPE_INPUT;
++	info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_SRGB;
++	info.get_name = hfr_slides_get_name;
++	info.create = hfr_slides_create;
++	info.destroy = hfr_slides_destroy;
++	info.update = hfr_slides_update;
++	info.video_render = hfr_slides_render;
++	info.video_tick = hfr_slides_tick;
++	info.get_width = hfr_slides_get_width;
++	info.get_height = hfr_slides_get_height;
++	info.get_properties = hfr_slides_properties;
++	obs_register_source(&info);
++	registered = true;
++	blog(LOG_INFO, "[HFR-SLIDES] 已注册来源 hfr_slides_source（自研引擎）");
++	return true;
++}
++
++/* ---------------- 外部控制（UI 线程） ---------------- */
++static HfrSlidesCtx *ctx_of(obs_source_t *src)
++{
++	if (!src) {
++		return nullptr;
++	}
++	const char *id = obs_source_get_id(src);
++	if (!id || strcmp(id, "hfr_slides_source") != 0) {
++		return nullptr;
++	}
++	return static_cast<HfrSlidesCtx *>(obs_obj_get_data(src));
++}
++
++void HfrSlidesSetFile(obs_source_t *src, const QString &path)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx) {
++		return;
++	}
++	ctx->file = path;
++	ctx->page = 0;
++	hfr_slides_rebuild(ctx);
++}
++
++void HfrSlidesSetPage(obs_source_t *src, int page)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx) {
++		return;
++	}
++	ctx->page = page;
++	std::wstring err;
++	if (hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
++		ctx->needUpload = true;
++	} else {
++		ctx->lastError = err;
++	}
++}
++
++int HfrSlidesPage(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	return ctx ? ctx->page : -1;
++}
++
++int HfrSlidesPageCount(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	return ctx ? (int)ctx->deck.slides.size() : 0;
++}
++
++static bool hfr_find_slides_cb(void *param, obs_source_t *src)
++{
++	if (!src) {
++		return true;
++	}
++	const char *id = obs_source_get_id(src);
++	if (id && strcmp(id, "hfr_slides_source") == 0) {
++		*static_cast<obs_source_t **>(param) = src;
++		return false;
++	}
++	return true;
++}
++
++obs_source_t *HfrFindFirstSlidesSource()
++{
++	obs_source_t *found = nullptr;
++	obs_enum_sources(hfr_find_slides_cb, &found);
++	return found;
++}
+diff --git a/frontend/widgets/HFRSlidesSource.hpp b/frontend/widgets/HFRSlidesSource.hpp
+new file mode 100644
+index 0000000..048fd74
+--- /dev/null
++++ b/frontend/widgets/HFRSlidesSource.hpp
+@@ -0,0 +1,44 @@
++#pragma once
++/* HFRSlidesSource —— 自研 PPT 引擎的 OBS 来源
++ * 渲染线程只做纹理上传与绘制；解析/光栅化在 UI 线程完成（见 ADR-005 教训）。 */
++#include <obs.hpp>
++
++#include <QString>
++#include <string>
++#include <vector>
++
++#include "HFRDeck.hpp"
++#include "HFRDeckRender.hpp"
++
++struct gs_texture;
++
++struct HfrSlidesGpuItem {
++	hfr::ItemKind kind = hfr::ItemKind::Rect;
++	int x = 0, y = 0, w = 0, h = 0;
++	int rot60k = 0;
++	gs_texture_t *tex = nullptr;   /* Rect/Text/Picture 都走纹理 */
++	std::string tmpPath;           /* Picture 的临时文件（供 gs_texture_create_from_file） */
++};
++
++struct HfrSlidesCtx {
++	QString file;
++	int page = 0;
++	int width = 1920, height = 1080;
++	hfr::Deck deck;
++	hfr::RenderSlide slide;
++	bool loaded = false;
++	bool needBuild = false;      /* UI 线程：需要重新解析/光栅化 */
++	bool needUpload = false;     /* 图形线程：需要上传纹理 */
++	std::wstring lastError;
++	std::vector<HfrSlidesGpuItem> gpu;
++};
++
++/* 注册来源类型（来源→+ 里可见） */
++bool HfrRegisterSlidesSource();
++
++/* 供控制台/讲者视图使用：设置文件与页码（UI 线程） */
++void HfrSlidesSetFile(obs_source_t *src, const QString &path);
++void HfrSlidesSetPage(obs_source_t *src, int page);
++int HfrSlidesPage(obs_source_t *src);
++int HfrSlidesPageCount(obs_source_t *src);
++obs_source_t *HfrFindFirstSlidesSource();
+diff --git a/frontend/widgets/OBSBasic.cpp b/frontend/widgets/OBSBasic.cpp
+index 1b0baba..e529a4f 100644
+--- a/frontend/widgets/OBSBasic.cpp
++++ b/frontend/widgets/OBSBasic.cpp
+@@ -23,6 +23,7 @@
+ #include "ColorSelect.hpp"
+ #include "HFRConsole.hpp"
+ #include "HFRPptSource.hpp"
++#include "HFRSlidesSource.hpp"
+ #include "OBSBasicControls.hpp"
+ #include "OBSBasicStats.hpp"
+ #include "plugin-manager/PluginManager.hpp"
+@@ -1040,6 +1041,7 @@ void OBSBasic::OBSInit()
+ 	{
+ 		/* 注册 PPT 来源（来源→+ 里可见） */
+ 		HfrRegisterPptSource();
++		HfrRegisterSlidesSource(); /* 自研引擎幻灯片来源 */
+ 		blog(LOG_INFO, "[HFR] obsinit: creating output matrix dock");
+ 		HFRConsoleDock *hfrDock = new HFRConsoleDock(this);
+ 		hfrDock->setObjectName(QStringLiteral("hfrOutputMatrixDock"));
+-- 
+2.56.0.windows.2
+
