@@ -1,0 +1,218 @@
+From 64dad41bd5f563b8541443bf789ec05091b8a848 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Sat, 10 Oct 2026 00:04:16 +0800
+Subject: [PATCH 38/38] feat(slides): render table cells (fills, text, grid
+ lines) from a:tbl instead of placeholder
+
+---
+ frontend/widgets/HFRDeck.cpp       |  39 ++++++++++-
+ frontend/widgets/HFRDeck.hpp       |  12 ++++
+ frontend/widgets/HFRDeckRender.cpp | 104 ++++++++++++++++++++++++++---
+ 3 files changed, 145 insertions(+), 10 deletions(-)
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index 5099b18..ebfebb5 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -985,8 +985,38 @@ void ParseShapeTree(const XNode *spTree, std::vector<Shape> &out, const std::map
+ 				const XNode *g = k.Child(L"graphic");
+ 				const XNode *gd = g->Child(L"graphicData");
+ 				if (gd) {
+-					if (gd->Child(L"tbl")) {
++					if (const XNode *tbl = gd->Child(L"tbl")) {
+ 						sh.kind = Shape::Kind::Table;
++						/* 列宽 */
++						if (const XNode *grid = tbl->Child(L"tblGrid")) {
++							for (const XNode *gc : grid->Children(L"gridCol")) {
++								sh.colW.push_back((double)ToI64(gc->Attr(L"w")));
++							}
++						}
++						/* 行高与单元格 */
++						for (const XNode *tr : tbl->Children(L"tr")) {
++							sh.rowH.push_back((double)ToI64(tr->Attr(L"h")));
++							std::vector<TableCell> row;
++							for (const XNode *tc : tr->Children(L"tc")) {
++								TableCell cell;
++								if (const std::wstring *hm = tc->Attr(L"hMerge")) {
++									cell.merged = (*hm == L"1");
++								}
++								if (const XNode *tx = tc->Child(L"txBody")) {
++									Shape tmp;
++									ParseTextBody(tx, tmp, theme);
++									cell.paras = tmp.paras;
++								}
++								if (const XNode *pr = tc->Child(L"tcPr")) {
++									if (const XNode *sf = pr->Child(L"solidFill")) {
++										cell.fill = ParseColor(sf, theme);
++										cell.hasFill = cell.fill.valid;
++									}
++								}
++								row.push_back(std::move(cell));
++							}
++							sh.cells.push_back(std::move(row));
++						}
+ 					} else if (gd->Child(L"chart")) {
+ 						sh.kind = Shape::Kind::Chart;
+ 					} else {
+@@ -1556,6 +1586,13 @@ std::string DeckSummary(const Deck &deck)
+ 			if (total) {
+ 				o << " runs=" << sh.paras.size() << " chars=" << total;
+ 			}
++			if (sh.kind == Shape::Kind::Table) {
++				o << " tableCols=" << sh.colW.size() << " rows=" << sh.rowH.size()
++				  << " cellRows=" << sh.cells.size();
++				if (!sh.cells.empty()) {
++					o << " cellCols0=" << sh.cells[0].size();
++				}
++			}
+ 			o << "\n";
+ 		}
+ 	}
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+index ddac643..518e9c6 100644
+--- a/frontend/widgets/HFRDeck.hpp
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -60,6 +60,13 @@ struct Anim {
+ 	double delayMs = 0.0;
+ };
+ 
++struct TableCell {
++	std::vector<Para> paras;
++	bool hasFill = false;
++	Color fill;
++	bool merged = false;
++};
++
+ struct Shape {
+ 	enum class Kind { Unknown, AutoShape, TextBox, Placeholder, Picture, Group, Table, Chart, Media };
+ 	Kind kind = Kind::Unknown;
+@@ -82,6 +89,11 @@ struct Shape {
+ 	std::wstring phType;
+ 	int phIdx = -1;
+ 	std::vector<Shape> children;        /* 组合 */
++
++	/* 表格（kind == Table） */
++	std::vector<double> colW;                  /* 列宽（EMU） */
++	std::vector<double> rowH;                  /* 行高（EMU） */
++	std::vector<std::vector<TableCell>> cells; /* [row][col] */
+ };
+ 
+ struct Slide {
+diff --git a/frontend/widgets/HFRDeckRender.cpp b/frontend/widgets/HFRDeckRender.cpp
+index da9a6fe..4ab257d 100644
+--- a/frontend/widgets/HFRDeckRender.cpp
++++ b/frontend/widgets/HFRDeckRender.cpp
+@@ -279,15 +279,101 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		out.items.push_back(std::move(it));
+ 	}
+ 	if (sh.kind == Shape::Kind::Table) {
+-		Item it;
+-		it.kind = ItemKind::Table;
+-		it.x = x;
+-		it.y = y;
+-		it.w = w;
+-		it.h = h;
+-		it.debug = sh.name;
+-		it.shapeIndex = shapeIndex;
+-		out.items.push_back(std::move(it));
++		if (sh.cells.empty() || sh.colW.empty()) {
++			Item it;
++			it.kind = ItemKind::Table;
++			it.x = x;
++			it.y = y;
++			it.w = w;
++			it.h = h;
++			it.debug = sh.name;
++			it.shapeIndex = shapeIndex;
++			out.items.push_back(std::move(it));
++			return;
++		}
++		/* 列宽/行高归一化到表格实际尺寸 */
++		double totalCol = 0, totalRow = 0;
++		for (double c : sh.colW) {
++			totalCol += c;
++		}
++		for (double r : sh.rowH) {
++			totalRow += r;
++		}
++		if (totalCol < 1.0) {
++			totalCol = 1.0;
++		}
++		if (totalRow < 1.0) {
++			totalRow = 1.0;
++		}
++		const uint32_t gridColor = 0xFF9E9E9Eu;
++		double yy = 0;
++		for (size_t r = 0; r < sh.cells.size(); r++) {
++			const int cy = y + (int)std::lround(yy / totalRow * (double)h);
++			const int ch = (r < sh.rowH.size()) ? (int)std::lround(sh.rowH[r] / totalRow * (double)h)
++							    : (int)((double)h / (double)sh.cells.size());
++			double xx = 0;
++			for (size_t c = 0; c < sh.cells[r].size(); c++) {
++				const int cx = x + (int)std::lround(xx / totalCol * (double)w);
++				const int cw = (c < sh.colW.size()) ? (int)std::lround(sh.colW[c] / totalCol * (double)w)
++								    : (int)((double)w / (double)sh.cells[r].size());
++				if (sh.cells[r][c].hasFill) {
++					Item bg;
++					bg.kind = ItemKind::Rect;
++					bg.x = cx;
++					bg.y = cy;
++					bg.w = cw;
++					bg.h = ch;
++					bg.color = sh.cells[r][c].fill.argb;
++					bg.shapeIndex = shapeIndex;
++					out.items.push_back(std::move(bg));
++				}
++				if (!sh.cells[r][c].paras.empty()) {
++					Shape cellShape;
++					cellShape.kind = Shape::Kind::TextBox;
++					cellShape.w = (int64_t)((double)cw / scale);
++					cellShape.h = (int64_t)((double)ch / scale);
++					cellShape.paras = sh.cells[r][c].paras;
++					Item t;
++					t.kind = ItemKind::Text;
++					t.x = cx;
++					t.y = cy;
++					t.shapeIndex = shapeIndex;
++					t.debug = sh.name;
++					int tw = 0, th = 0;
++					if (RasterizeText(cellShape, deck, scale, ptScale, t.pix, tw, th)) {
++						t.texW = tw;
++						t.texH = th;
++						t.w = tw;
++						t.h = th;
++						out.items.push_back(std::move(t));
++					}
++				}
++				if (c > 0) {
++					Item ln;
++					ln.kind = ItemKind::Rect;
++					ln.x = cx;
++					ln.y = cy;
++					ln.w = 1;
++					ln.h = ch;
++					ln.color = gridColor;
++					ln.shapeIndex = shapeIndex;
++					out.items.push_back(std::move(ln));
++				}
++				xx += (c < sh.colW.size()) ? sh.colW[c] : 0;
++			}
++			if (r > 0) {
++				Item ln;
++				ln.kind = ItemKind::Rect;
++				ln.x = x;
++				ln.y = cy;
++				ln.w = w;
++				ln.h = 1;
++				ln.color = gridColor;
++				ln.shapeIndex = shapeIndex;
++				out.items.push_back(std::move(ln));
++			}
++			yy += (r < sh.rowH.size()) ? sh.rowH[r] : 0;
++		}
+ 		return;
+ 	}
+ 	bool hasText = false;
+-- 
+2.56.0.windows.2
+

@@ -1,0 +1,295 @@
+From fd34326452dbb2a0c0427aafbc2667abc79e5145 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Sat, 10 Oct 2026 00:02:06 +0800
+Subject: [PATCH 37/38] feat(slides+presenter): speaker notes from notesSlide,
+ engine-rendered presenter previews, animation-aware page keys, console slides
+ row
+
+---
+ frontend/widgets/HFRDeck.cpp         | 74 ++++++++++++++++++++++++++++
+ frontend/widgets/HFRPresenter.cpp    | 72 ++++++++++++++++++++++++++-
+ frontend/widgets/HFRSlidesSource.cpp | 24 +++++++++
+ frontend/widgets/HFRSlidesSource.hpp |  6 +++
+ 4 files changed, 175 insertions(+), 1 deletion(-)
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index c8e88cd..5099b18 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include <algorithm>
+ #include <cstdio>
++#include <functional>
+ #include <cstring>
+ #include <fstream>
+ #include <sstream>
+@@ -720,6 +721,54 @@ void CollectBehaviors(const XNode *node, Slide &slide, double inheritedDurMs)
+ 	}
+ }
+ 
++/* 从备注页 XML 提取纯文本 */
++std::wstring ExtractNotesText(const std::vector<uint8_t> &xml)
++{
++	if (xml.empty()) {
++		return std::wstring();
++	}
++	XNode root;
++	if (!ParseXml(xml, root)) {
++		return std::wstring();
++	}
++	const XNode *cSld = root.Child(L"cSld");
++	const XNode *spTree = cSld ? cSld->Child(L"spTree") : root.Child(L"spTree");
++	if (!spTree) {
++		return std::wstring();
++	}
++	std::wstring out;
++	std::function<void(const XNode *)> walk = [&](const XNode *node) {
++		if (!node) {
++			return;
++		}
++		const std::wstring ln = XNode::LocalName(node->name);
++		if (ln == L"sp" || ln == L"graphicFrame") {
++			const XNode *tx = node->Child(L"txBody");
++			if (tx) {
++				for (const XNode *p : tx->Children(L"p")) {
++					std::wstring line;
++					for (const XNode *r : p->Children(L"r")) {
++						if (const XNode *t = r->Child(L"t")) {
++							line += t->text;
++						}
++					}
++					if (!line.empty()) {
++						if (!out.empty()) {
++							out += L"\n";
++						}
++						out += line;
++					}
++				}
++			}
++		}
++		for (const XNode &k : node->kids) {
++			walk(&k);
++		}
++	};
++	walk(spTree);
++	return out;
++}
++
+ /* 解析 p:timing → 每个点击步骤一组动画 */
+ void ParseTiming(const XNode &slideRoot, Slide &slide)
+ {
+@@ -1410,6 +1459,31 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 				}
+ 			}
+ 		}
++		/* 备注（notesSlide） */
++		{
++			const std::string slashn = part.substr(0, part.find_last_of('/'));
++			const std::string fnn = part.substr(part.find_last_of('/') + 1);
++			std::vector<uint8_t> rb;
++			if (zip.Read(slashn + "/_rels/" + fnn + ".rels", rb)) {
++				XNode rr;
++				std::map<std::wstring, RelInfo> info;
++				if (ParseXml(rb, rr)) {
++					ParseRelsEx(rr, info);
++					for (const auto &kv : info) {
++						if (kv.second.type.find(L"notesSlide") != std::wstring::npos) {
++							const std::string np =
++								NormalizeTarget(part, Narrow(kv.second.target));
++							std::vector<uint8_t> nb;
++							if (zip.Read(np, nb)) {
++								slide.notes = ExtractNotesText(nb);
++							}
++							break;
++						}
++					}
++				}
++			}
++		}
++
+ 		ApplyTextStyles(slide, out);
+ 		/* 动画（p:timing） */
+ 		ParseTiming(root, slide);
+diff --git a/frontend/widgets/HFRPresenter.cpp b/frontend/widgets/HFRPresenter.cpp
+index 7a4e350..ff72c4c 100644
+--- a/frontend/widgets/HFRPresenter.cpp
++++ b/frontend/widgets/HFRPresenter.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "HFRPpt.hpp"
+ #include "HFRPptSource.hpp"
++#include "HFRSlidesSource.hpp"
+ 
+ #include <QApplication>
+ #include <QCheckBox>
+@@ -15,6 +16,9 @@
+ #include <QTextEdit>
+ #include <QVBoxLayout>
+ 
++#include <cstring>
++#include <vector>
++
+ #include <obs-module.h>
+ 
+ static HfrPresenterWindow *g_presenter = nullptr;
+@@ -113,8 +117,30 @@ HFRPptDocument *HfrPresenterWindow::Doc() const
+ 	return nullptr;
+ }
+ 
++/* 优先使用自研引擎来源（HFRSlidesSource） */
++static bool IsSlidesSource(obs_source_t *s)
++{
++	if (!s) {
++		return false;
++	}
++	const char *id = obs_source_get_id(s);
++	return id && strcmp(id, "hfr_slides_source") == 0;
++}
++
+ void HfrPresenterWindow::GotoNext()
+ {
++	if (IsSlidesSource(src)) {
++		const int cur = HfrSlidesPage(src);
++		const int total = HfrSlidesPageCount(src);
++		/* 本页还有动画未播 → 先推进动画；否则翻页 */
++		if (!HfrSlidesNextAnim(src)) {
++			if (cur + 1 < total) {
++				HfrSlidesSetPage(src, cur + 1);
++			}
++		}
++		RefreshAll();
++		return;
++	}
+ 	HFRPptDocument *d = Doc();
+ 	if (!d || !d->IsOpen()) {
+ 		return;
+@@ -129,6 +155,16 @@ void HfrPresenterWindow::GotoNext()
+ 
+ void HfrPresenterWindow::GotoPrev()
+ {
++	if (IsSlidesSource(src)) {
++		const int cur = HfrSlidesPage(src);
++		if (HfrSlidesAnimStep(src) > 0) {
++			HfrSlidesPrevAnim(src);
++		} else if (cur > 0) {
++			HfrSlidesSetPage(src, cur - 1);
++		}
++		RefreshAll();
++		return;
++	}
+ 	HFRPptDocument *d = Doc();
+ 	if (!d || !d->IsOpen()) {
+ 		return;
+@@ -152,6 +188,32 @@ static QPixmap PixmapFromBgra(const std::vector<uint8_t> &buf, uint32_t w, uint3
+ 
+ void HfrPresenterWindow::UpdateImages()
+ {
++	if (IsSlidesSource(src)) {
++		const int cur = HfrSlidesPage(src);
++		const int total = HfrSlidesPageCount(src);
++		std::vector<uint8_t> buf;
++		QImage img;
++		if (HfrSlidesRenderPreview(src, cur, 960, 540, buf) && !buf.empty()) {
++			img = QImage((const uchar *)buf.data(), 960, 540, 960 * 4, QImage::Format_ARGB32).copy();
++			curView->setPixmap(QPixmap::fromImage(img).scaled(curView->size(), Qt::KeepAspectRatio,
++									  Qt::SmoothTransformation));
++		} else {
++			curView->setText(QStringLiteral("未载入演示文稿"));
++		}
++		if (cur + 1 < total && HfrSlidesRenderPreview(src, cur + 1, 480, 270, buf)) {
++			QImage nimg((const uchar *)buf.data(), 480, 270, 480 * 4, QImage::Format_ARGB32);
++			nextView->setPixmap(QPixmap::fromImage(nimg.copy())
++						    .scaled(nextView->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
++		} else {
++			nextView->setText(QStringLiteral("（已是最后一页）"));
++		}
++		pageLabel->setText(QStringLiteral("第 %1/%2 页 · 动画 %3/%4 步")
++					   .arg(cur + 1)
++					   .arg(total)
++					   .arg(HfrSlidesAnimStep(src))
++					   .arg(HfrSlidesAnimStepCount(src)));
++		return;
++	}
+ 	HFRPptDocument *d = Doc();
+ 	if (!d || !d->IsOpen()) {
+ 		curView->setText(QStringLiteral("未绑定 PPT：请先在画布/场景里添加\"PPT 演示文稿\"来源"));
+@@ -179,6 +241,11 @@ void HfrPresenterWindow::UpdateImages()
+ 
+ void HfrPresenterWindow::UpdateNotes()
+ {
++	if (IsSlidesSource(src)) {
++		const std::wstring n = HfrSlidesNotes(src);
++		notesView->setPlainText(n.empty() ? QString() : QString::fromWCharArray(n.c_str()));
++		return;
++	}
+ 	HFRPptDocument *d = Doc();
+ 	const QString notes = (d && d->IsOpen()) ? d->NotesText() : QString();
+ 	notesView->setPlainText(notes);
+@@ -225,7 +292,10 @@ void HfrOpenPresenterWindow()
+ 	if (!g_presenter) {
+ 		g_presenter = new HfrPresenterWindow();
+ 	}
+-	obs_source_t *src = HfrFindFirstPptSource();
++	obs_source_t *src = HfrFindFirstSlidesSource();
++	if (!src) {
++		src = HfrFindFirstPptSource();
++	}
+ 	if (src) {
+ 		g_presenter->BindSource(src);
+ 	}
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+index 897063e..0fe3ce2 100644
+--- a/frontend/widgets/HFRSlidesSource.cpp
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -567,6 +567,30 @@ static void start_step_anim(HfrSlidesCtx *ctx)
+ 	ctx->animating = (ctx->animDurationMs > 0.0);
+ }
+ 
++std::wstring HfrSlidesNotes(obs_source_t *src)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx || ctx->deck.slides.empty() || ctx->page >= (int)ctx->deck.slides.size()) {
++		return std::wstring();
++	}
++	return ctx->deck.slides[(size_t)ctx->page].notes;
++}
++
++bool HfrSlidesRenderPreview(obs_source_t *src, int page, int w, int h, std::vector<uint8_t> &bgraOut)
++{
++	HfrSlidesCtx *ctx = ctx_of(src);
++	if (!ctx || ctx->deck.slides.empty() || w <= 0 || h <= 0) {
++		return false;
++	}
++	hfr::RenderSlide rs;
++	std::wstring err;
++	if (!hfr::BuildSlide(ctx->deck, page, w, h, rs, err)) {
++		return false;
++	}
++	hfr::CompositeToBgra(rs, bgraOut);
++	return true;
++}
++
+ int HfrSlidesAnimStep(obs_source_t *src)
+ {
+ 	HfrSlidesCtx *ctx = ctx_of(src);
+diff --git a/frontend/widgets/HFRSlidesSource.hpp b/frontend/widgets/HFRSlidesSource.hpp
+index b4469cb..354c89c 100644
+--- a/frontend/widgets/HFRSlidesSource.hpp
++++ b/frontend/widgets/HFRSlidesSource.hpp
+@@ -56,6 +56,12 @@ int HfrSlidesPage(obs_source_t *src);
+ int HfrSlidesPageCount(obs_source_t *src);
+ obs_source_t *HfrFindFirstSlidesSource();
+ 
++/* 当前页备注文本（讲者视图用） */
++std::wstring HfrSlidesNotes(obs_source_t *src);
++
++/* CPU 渲染某页为 BGRA（讲者视图预览用；w/h 为目标尺寸） */
++bool HfrSlidesRenderPreview(obs_source_t *src, int page, int w, int h, std::vector<uint8_t> &bgraOut);
++
+ /* 动画控制（UI 线程调用） */
+ int HfrSlidesAnimStep(obs_source_t *src);      /* 已完成的步数 */
+ int HfrSlidesAnimStepCount(obs_source_t *src); /* 总步数 */
+-- 
+2.56.0.windows.2
+

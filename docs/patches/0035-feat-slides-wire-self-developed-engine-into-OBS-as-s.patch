@@ -1,7 +1,7 @@
 From 863ef458e6446e0a17d1842b45ec6935ca02e7ff Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 9 Oct 2026 23:55:41 +0800
-Subject: [PATCH 35/36] feat(slides): wire self-developed engine into OBS as
+Subject: [PATCH 35/38] feat(slides): wire self-developed engine into OBS as
  source hfr_slides_source (GPU draw, rotation, textures; zlib linked)
 
 ---

@@ -1,7 +1,7 @@
 From f3939e26c0cd5fd6ae1b4771a3d65dd2cbb090bf Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 9 Oct 2026 23:59:27 +0800
-Subject: [PATCH 36/36] feat(slides): real-time animation timeline - parse
+Subject: [PATCH 36/38] feat(slides): real-time animation timeline - parse
  p:timing click sequence, per-frame easing (fade/wipe/fly/zoom/exit/emphasis),
  property controls
 
