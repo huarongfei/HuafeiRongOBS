@@ -62,3 +62,23 @@ pptx(zip)
   - 占位符/版式 **transform 继承**（当前占位符 pos/size 为 0）
   - **渐变填充**(`gradFill`)、图片裁剪、线宽/虚线、阴影
   - 渲染层：OBS 图形栈提交（形状用顶点/纹理，文本用 GDI/DirectWrite 光栅化到纹理）
+## 8. M1 进展：文本样式继承 + 视觉对比工具链（2026-09-25）
+### 已实现
+- **母版 `p:txStyles` 解析**（titleStyle/bodyStyle/otherStyle × 9 级）：字号、粗斜体、颜色、项目符号字符(`buChar`)、左缩进(`marL`)、行距(`lnSpc/spcPct`)
+- **版式/母版占位符几何继承**：按 `type|idx` → `type|*` → `idx:N` → `|idx` → `body|idx` 候选链**择优**（优先"带几何"的候选，避免空条目挡住回退）；按字段合并（后者有值才覆盖）
+- **渲染层**：字号用"幻灯片高度→磅"换算（修掉原先用 EMU 比例导致文字极小的 bug）；项目符号/缩进按文档值绘制
+- **对比工具链**（关键基础设施）：
+  - `hfr_deck_dump.exe <pptx> --bmp out.bmp --slide N` → 我们的引擎渲染为 BMP
+  - `hfr_deck_dump.exe x --pdfref out.pdf --pdfium <pdfiumlo.dll> --bmp ref.bmp --slide N` → **LibreOffice 官方渲染**作为参考
+  - 同一工具、同一分辨率下逐页对比，保真回归可自动化
+### 本页对比结论（rich-deck 第 1 页）
+| 项目 | 修复前 | 修复后 |
+|---|---|---|
+| 标题字号 | 18pt（默认） | ✅ 44pt（母版 titleStyle） |
+| 项目符号 | 无 | ✅ 按级别 `•` / `–` |
+| 缩进 | 粗略估算 | ✅ 用文档 `marL` |
+| 文本方向/大小 | 文字极小、BMP 上下颠倒 | ✅ 修正 |
+### 待办
+- 标题左内边距(`lIns`)与 LO 有细微差异；项目符号与正文间距需微调
+- 表格单元格渲染、图片实际绘制（OBS 路径）、渐变真渲染
+- OBS 来源接入（`hfr_slides_source`）与实时动画时间轴
