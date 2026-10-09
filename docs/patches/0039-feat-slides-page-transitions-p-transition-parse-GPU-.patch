@@ -1,0 +1,325 @@
+From 0a8c5e0b2db6a326dcddc18e68d07fc36b331af6 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Sat, 10 Oct 2026 00:18:33 +0800
+Subject: [PATCH 39/39] feat(slides): page transitions (p:transition parse +
+ GPU fade/push/wipe with previous-page texture handoff)
+
+---
+ frontend/widgets/HFRDeck.cpp         |  47 +++++++++-
+ frontend/widgets/HFRDeck.hpp         |   6 ++
+ frontend/widgets/HFRSlidesSource.cpp | 133 ++++++++++++++++++++++++++-
+ frontend/widgets/HFRSlidesSource.hpp |   9 ++
+ 4 files changed, 189 insertions(+), 6 deletions(-)
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index ebfebb5..08585f3 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -769,6 +769,47 @@ std::wstring ExtractNotesText(const std::vector<uint8_t> &xml)
+ 	return out;
+ }
+ 
++/* 解析 p:transition（页间切换） */
++void ParseTransition(const XNode &slideRoot, Slide &slide)
++{
++	const XNode *tr = slideRoot.Child(L"transition");
++	if (!tr) {
++		return;
++	}
++	/* spd: slow=1000ms, med=500ms, fast=250ms（PowerPoint 常规取值） */
++	double ms = 500.0;
++	if (const std::wstring *spd = tr->Attr(L"spd")) {
++		if (*spd == L"slow") {
++			ms = 1000.0;
++		} else if (*spd == L"fast") {
++			ms = 250.0;
++		}
++	}
++	if (const std::wstring *adv = tr->Attr(L"advClick")) {
++		slide.transAdvClick = (*adv != L"0" && *adv != L"false");
++	}
++	/* 第一个子元素即为类型 */
++	for (const XNode &k : tr->kids) {
++		const std::wstring ln = XNode::LocalName(k.name);
++		if (ln == L"extLst" || ln == L"sndAc") {
++			continue;
++		}
++		slide.transType = ln;
++		if (const std::wstring *dir = k.Attr(L"dir")) {
++			slide.transDir = *dir;
++		}
++		if (const std::wstring *spd2 = k.Attr(L"spd")) {
++			if (*spd2 == L"slow") {
++				ms = 1000.0;
++			} else if (*spd2 == L"fast") {
++				ms = 250.0;
++			}
++		}
++		break;
++	}
++	slide.transMs = ms;
++}
++
+ /* 解析 p:timing → 每个点击步骤一组动画 */
+ void ParseTiming(const XNode &slideRoot, Slide &slide)
+ {
+@@ -1515,7 +1556,8 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 		}
+ 
+ 		ApplyTextStyles(slide, out);
+-		/* 动画（p:timing） */
++		/* 页间切换 + 动画 */
++		ParseTransition(root, slide);
+ 		ParseTiming(root, slide);
+ 		for (auto &step : slide.animSteps) {
+ 			for (Anim &a : step) {
+@@ -1528,7 +1570,8 @@ bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
+ 			}
+ 		}
+ 		out.debugInfo += L"slide" + std::to_wstring(out.slides.size() + 1) + L": animSteps=" +
+-				 std::to_wstring(slide.animSteps.size()) + L"\n";
++				 std::to_wstring(slide.animSteps.size()) + L" trans=" + slide.transType +
++				 (slide.transDir.empty() ? L"" : (L"/" + slide.transDir)) + L"\n";
+ 		out.slides.push_back(std::move(slide));
+ 	}
+ 
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+index 518e9c6..e307f7e 100644
+--- a/frontend/widgets/HFRDeck.hpp
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -101,6 +101,12 @@ struct Slide {
+ 	std::wstring notes;
+ 	/* 动画步骤：外层 vector = 每次"点击"推进的一步 */
+ 	std::vector<std::vector<Anim>> animSteps;
++
++	/* 页间切换（p:transition） */
++	std::wstring transType;   /* fade / push / wipe / cover / dissolve / none */
++	std::wstring transDir;    /* l / r / u / d（push/wipe/cover） */
++	double transMs = 500.0;   /* 时长（按 spd 换算） */
++	bool transAdvClick = true;
+ };
+ 
+ struct Deck {
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+index 0fe3ce2..711a98b 100644
+--- a/frontend/widgets/HFRSlidesSource.cpp
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -18,9 +18,11 @@
+ #include <cmath>
+ #include <cstring>
+ 
+-/* 前置声明（属性面板按钮会用到） */
++/* 前置声明（属性面板按钮与换页逻辑会用到） */
+ static int step_count(HfrSlidesCtx *ctx);
+ static void start_step_anim(HfrSlidesCtx *ctx);
++static void start_transition(HfrSlidesCtx *ctx);
++static void destroy_items(std::vector<HfrSlidesGpuItem> &items);
+ 
+ /* ============================ 来源实现 ============================ */
+ 
+@@ -117,6 +119,7 @@ static void hfr_slides_update(void *data, obs_data_t *settings)
+ 		if (hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
+ 			ctx->needUpload = true;
+ 			hfr_slides_reset_timeline(ctx);
++			start_transition(ctx);
+ 		} else {
+ 			ctx->lastError = err;
+ 		}
+@@ -131,6 +134,11 @@ static void hfr_slides_destroy(void *data)
+ 	if (!ctx) {
+ 		return;
+ 	}
++	if (!ctx->gpuOld.empty()) {
++		obs_enter_graphics();
++		destroy_items(ctx->gpuOld);
++		obs_leave_graphics();
++	}
+ 	hfr_slides_destroy_gpu(ctx);
+ 	for (const HfrSlidesGpuItem &it : ctx->gpu) {
+ 		if (!it.tmpPath.empty()) {
+@@ -152,9 +160,68 @@ static uint32_t hfr_slides_get_height(void *data)
+ 	return ctx ? (uint32_t)ctx->height : 0;
+ }
+ 
++/* 销毁指定纹理集合（需图形上下文） */
++static void destroy_items(std::vector<HfrSlidesGpuItem> &items)
++{
++	for (HfrSlidesGpuItem &it : items) {
++		if (it.tex) {
++			gs_texture_destroy(it.tex);
++			it.tex = nullptr;
++		}
++	}
++	items.clear();
++}
++
++/* 启动页间切换（UI 线程调用）：保留上一页纹理 */
++static void start_transition(HfrSlidesCtx *ctx)
++{
++	if (!ctx || ctx->deck.slides.empty() || ctx->page >= (int)ctx->deck.slides.size()) {
++		ctx->transActive = false;
++		return;
++	}
++	const hfr::Slide &sl = ctx->deck.slides[(size_t)ctx->page];
++	ctx->transActive = true;
++	ctx->transStartNs = os_gettime_ns();
++	ctx->transDurMs = (sl.transMs > 1.0) ? sl.transMs : 500.0;
++	ctx->transDirX = 0;
++	ctx->transDirY = 0;
++	const std::wstring &t = sl.transType;
++	const std::wstring &d = sl.transDir;
++	if (t == L"fade" || t == L"dissolve") {
++		ctx->transKind = 1;
++	} else if (t == L"push" || t == L"cover") {
++		ctx->transKind = 2;
++	} else if (t == L"wipe") {
++		ctx->transKind = 3;
++	} else {
++		ctx->transKind = 1; /* 未知类型退化为淡入 */
++	}
++	if (d == L"l") {
++		ctx->transDirX = 1; /* 新页从右边推入 */
++	} else if (d == L"r") {
++		ctx->transDirX = -1;
++	} else if (d == L"u") {
++		ctx->transDirY = 1;
++	} else if (d == L"d") {
++		ctx->transDirY = -1;
++	}
++}
++
+ /* 图形线程：上传纹理 */
+ static void hfr_slides_upload(HfrSlidesCtx *ctx)
+ {
++	if (ctx->transActive && !ctx->gpu.empty()) {
++		/* 把当前页纹理移交为"上一页"，等切换结束后释放（需图形上下文） */
++		obs_enter_graphics();
++		destroy_items(ctx->gpuOld);
++		obs_leave_graphics();
++		ctx->gpuOld = std::move(ctx->gpu);
++		ctx->gpu.clear();
++	} else if (!ctx->transActive && !ctx->gpuOld.empty()) {
++		obs_enter_graphics();
++		destroy_items(ctx->gpuOld);
++		obs_leave_graphics();
++	}
+ 	hfr_slides_destroy_gpu(ctx);
+ 	const QString cache = HfrPptCacheDir();
+ 	/* Rect 用 1x1 纯色纹理；Text 用 BGRA；Picture 写临时文件后用 gs 加载 */
+@@ -208,25 +275,81 @@ static void hfr_slides_render(void *data, gs_effect_t *)
+ 	if (ctx->needUpload) {
+ 		hfr_slides_upload(ctx);
+ 	}
+-	if (ctx->gpu.empty()) {
++	if (ctx->needDestroyOld) {
++		obs_enter_graphics();
++		destroy_items(ctx->gpuOld);
++		obs_leave_graphics();
++		ctx->needDestroyOld = false;
++	}
++	if (ctx->gpu.empty() && ctx->gpuOld.empty()) {
+ 		return;
+ 	}
++	/* 切换进度 */
++	float tp = 1.0f;
++	if (ctx->transActive) {
++		const double el = (double)(os_gettime_ns() - ctx->transStartNs) / 1000000.0;
++		tp = (float)(el / (ctx->transDurMs > 1.0 ? ctx->transDurMs : 500.0));
++		if (tp >= 1.0f) {
++			tp = 1.0f;
++			ctx->transActive = false;
++			ctx->needDestroyOld = true;
++		}
++		if (tp < 0.0f) {
++			tp = 0.0f;
++		}
++	}
++	const float te = 1.0f - (1.0f - tp) * (1.0f - tp); /* EaseOut */
+ 	gs_effect_t *eff = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+ 	gs_technique_t *tech = gs_effect_get_technique(eff, "Draw");
+ 	gs_eparam_t *img = gs_effect_get_param_by_name(eff, "image");
+ 	gs_eparam_t *mul = gs_effect_get_param_by_name(eff, "multiplier");
+ 	gs_technique_begin(tech);
++
++	/* 切换中：先画上一页（推入时同步位移） */
++	if (ctx->transActive && !ctx->gpuOld.empty()) {
++		for (const HfrSlidesGpuItem &it : ctx->gpuOld) {
++			if (!it.tex) {
++				continue;
++			}
++			gs_technique_begin_pass(tech, 0);
++			gs_effect_set_texture(img, it.tex);
++			if (mul) {
++				gs_effect_set_float(mul, 1.0f);
++			}
++			gs_matrix_push();
++			float ox = 0.0f, oy = 0.0f;
++			if (ctx->transKind == 2) {
++				ox = (float)ctx->transDirX * (float)ctx->width * te;
++				oy = (float)ctx->transDirY * (float)ctx->height * te;
++			}
++			gs_matrix_translate3f((float)it.x + it.dx + ox, (float)it.y + it.dy + oy, 0.0f);
++			gs_draw_sprite(it.tex, 0, (uint32_t)it.w, (uint32_t)it.h);
++			gs_matrix_pop();
++			gs_technique_end_pass(tech);
++		}
++	}
++
+ 	for (const HfrSlidesGpuItem &it : ctx->gpu) {
+ 		if (!it.tex || it.alpha <= 0.001f) {
+ 			continue;
+ 		}
+ 		gs_technique_begin_pass(tech, 0);
+ 		gs_effect_set_texture(img, it.tex);
++		float alpha = it.alpha;
++		float tx = it.dx, ty = it.dy;
++		if (ctx->transActive) {
++			if (ctx->transKind == 1 || ctx->transKind == 3) {
++				alpha = it.alpha * te; /* 淡入 / 擦除近似 */
++			} else if (ctx->transKind == 2) {
++				tx += (float)(-ctx->transDirX) * (float)ctx->width * (1.0f - te);
++				ty += (float)(-ctx->transDirY) * (float)ctx->height * (1.0f - te);
++			}
++		}
+ 		if (mul) {
+-			gs_effect_set_float(mul, it.alpha);
++			gs_effect_set_float(mul, alpha);
+ 		}
+ 		gs_matrix_push();
+-		gs_matrix_translate3f((float)it.x + it.dx, (float)it.y + it.dy, 0.0f);
++		gs_matrix_translate3f((float)it.x + tx, (float)it.y + ty, 0.0f);
+ 		if (it.scale != 1.0f || it.rot60k) {
+ 			const float cx = (float)it.w / 2.0f, cy = (float)it.h / 2.0f;
+ 			gs_matrix_translate3f(cx, cy, 0.0f);
+@@ -508,6 +631,8 @@ void HfrSlidesSetPage(obs_source_t *src, int page)
+ 	std::wstring err;
+ 	if (hfr::BuildSlide(ctx->deck, ctx->page, ctx->width, ctx->height, ctx->slide, err)) {
+ 		ctx->needUpload = true;
++		hfr_slides_reset_timeline(ctx);
++		start_transition(ctx);
+ 	} else {
+ 		ctx->lastError = err;
+ 	}
+diff --git a/frontend/widgets/HFRSlidesSource.hpp b/frontend/widgets/HFRSlidesSource.hpp
+index 354c89c..1e0a0a8 100644
+--- a/frontend/widgets/HFRSlidesSource.hpp
++++ b/frontend/widgets/HFRSlidesSource.hpp
+@@ -44,6 +44,15 @@ struct HfrSlidesCtx {
+ 	uint64_t animStartNs = 0;
+ 	/* 一步内的最大时长（毫秒），用于判断动画是否结束 */
+ 	double animDurationMs = 0.0;
++
++	/* —— 页间切换 —— */
++	std::vector<HfrSlidesGpuItem> gpuOld; /* 上一页纹理（切换期间保留） */
++	bool transActive = false;
++	uint64_t transStartNs = 0;
++	double transDurMs = 0.0;
++	int transKind = 0; /* 0=无 1=淡入淡出 2=推进 3=擦除/覆盖 */
++	int transDirX = 0, transDirY = 0;
++	bool needDestroyOld = false;
+ };
+ 
+ /* 注册来源类型（来源→+ 里可见） */
+-- 
+2.56.0.windows.2
+

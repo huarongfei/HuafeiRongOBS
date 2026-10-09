@@ -52,6 +52,10 @@ def anim_block(steps):
     return f'''<p:timing><p:tnLst><p:par><p:cTn id="1" dur="indefinite" restart="never" nodeType="tmRoot"><p:childTnLst><p:seq concurrent="1" nextAc="seek"><p:cTn id="2" dur="indefinite" nodeType="mainSeq"><p:childTnLst>{joined}
               </p:childTnLst></p:cTn><p:prevCondLst><p:cond evt="onPrev" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:prevCondLst><p:nextCondLst><p:cond evt="onNext" delay="0"><p:tgtEl><p:sldTgt/></p:tgtEl></p:cond></p:nextCondLst></p:seq></p:childTnLst></p:cTn></p:par></p:tnLst></p:timing>'''
 
+def trans_block(kind, spd="med", dir_=None):
+    d = f' dir="{dir_}"' if dir_ else ''
+    return f'<p:transition spd="{spd}" advClick="1"><p:{kind}{d}/></p:transition>'
+
 # 第 1 页：标题 淡入(点击1)、正文 淡入(点击2)
 steps1 = [(2, "entr", 10, "fade", "in", 500),
           (4, "entr", 10, "fade", "in", 700)]
@@ -64,11 +68,15 @@ for item in zin.infolist():
     data = zin.read(item.filename)
     if item.filename == 'ppt/slides/slide1.xml':
         xml = data.decode('utf-8')
-        xml = xml.replace('</p:sld>', anim_block(steps1) + '</p:sld>')
+        xml = xml.replace('</p:sld>', trans_block('fade') + anim_block(steps1) + '</p:sld>')
+        data = xml.encode('utf-8')
+    elif item.filename == 'ppt/slides/slide2.xml':
+        xml = data.decode('utf-8')
+        xml = xml.replace('</p:sld>', trans_block('wipe', 'slow', 'u') + '</p:sld>')
         data = xml.encode('utf-8')
     elif item.filename == 'ppt/slides/slide3.xml':
         xml = data.decode('utf-8')
-        xml = xml.replace('</p:sld>', anim_block(steps3) + '</p:sld>')
+        xml = xml.replace('</p:sld>', trans_block('push', 'fast', 'l') + anim_block(steps3) + '</p:sld>')
         data = xml.encode('utf-8')
     zout.writestr(item, data)
 zout.close(); zin.close()
