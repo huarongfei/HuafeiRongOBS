@@ -1,7 +1,7 @@
 From e2fce005678f05b6be6961e24a4c5cb30e152866 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 20:00:24 +0800
-Subject: [PATCH 30/32] =?UTF-8?q?fix(ppt):=20harden=20LOK=20loader=20?=
+Subject: [PATCH 30/33] =?UTF-8?q?fix(ppt):=20harden=20LOK=20loader=20?=
  =?UTF-8?q?=E2=80=94=20AddDllDirectory+user-dirs,=20altered=20search=20pat?=
  =?UTF-8?q?h,=20plain=20fallback;=20log=20resolved=20path=20and=20per-stra?=
  =?UTF-8?q?tegy=20error=20codes?=
@@ -83,5 +83,5 @@ index 9d583b1..bdab988 100644
  			*errOut = lastError;
  		}
 -- 
-2.55.0.windows.5
+2.56.0.windows.2
 

@@ -1,0 +1,1093 @@
+From fbec4511be6c35e181a74addb829e189e60d1fdb Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Fri, 9 Oct 2026 23:22:00 +0800
+Subject: [PATCH 33/33] =?UTF-8?q?feat(slides):=20M0=20parser=20=E2=80=94?=
+ =?UTF-8?q?=20self-contained=20zip(zlib)+mini-XML=20OOXML=20reader=20produ?=
+ =?UTF-8?q?cing=20deck=20model=20(shapes/text/images/tables/theme);=20stan?=
+ =?UTF-8?q?dalone=20dump=20tool=20for=20verification?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ frontend/widgets/HFRDeck.cpp     | 940 +++++++++++++++++++++++++++++++
+ frontend/widgets/HFRDeck.hpp     |  76 +++
+ frontend/widgets/HFRDeckDump.cpp |  34 ++
+ 3 files changed, 1050 insertions(+)
+ create mode 100644 frontend/widgets/HFRDeck.cpp
+ create mode 100644 frontend/widgets/HFRDeck.hpp
+ create mode 100644 frontend/widgets/HFRDeckDump.cpp
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+new file mode 100644
+index 0000000..5f5de15
+--- /dev/null
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -0,0 +1,940 @@
++#include "HFRDeck.hpp"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstring>
++#include <fstream>
++#include <sstream>
++
++#include <windows.h>
++#include <cwchar>
++#include <cwctype>
++
++#include <zlib.h>
++
++namespace hfr {
++namespace {
++
++/* ============================ zip 读取 ============================ */
++uint16_t Rd16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
++uint32_t Rd32(const uint8_t *p) { return (uint32_t)(p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32_t)p[3] << 24)); }
++
++struct ZipEntry {
++	std::string name;
++	uint16_t method = 0;
++	uint32_t compSize = 0;
++	uint32_t uncompSize = 0;
++	uint32_t localOff = 0;
++};
++
++struct Zip {
++	std::vector<uint8_t> data;
++	std::map<std::string, ZipEntry> entries;
++
++	bool Open(const std::wstring &path)
++	{
++		std::ifstream f(path, std::ios::binary);
++		if (!f) {
++			return false;
++		}
++		f.seekg(0, std::ios::end);
++		const std::streamoff n = f.tellg();
++		f.seekg(0, std::ios::beg);
++		if (n <= 0) {
++			return false;
++		}
++		data.resize((size_t)n);
++		f.read((char *)data.data(), n);
++		if (!f) {
++			return false;
++		}
++		/* 找 EOCD */
++		const size_t maxBack = std::min<size_t>(data.size(), 66000);
++		size_t eocd = SIZE_MAX;
++		for (size_t i = data.size() - 22; i + 22 <= data.size() && i >= data.size() - maxBack; i--) {
++			if (Rd32(&data[i]) == 0x06054b50u) {
++				eocd = i;
++				break;
++			}
++			if (i == 0) {
++				break;
++			}
++		}
++		if (eocd == SIZE_MAX) {
++			return false;
++		}
++		const uint16_t count = Rd16(&data[eocd + 10]);
++		uint32_t off = Rd32(&data[eocd + 16]);
++		for (uint16_t i = 0; i < count && off + 46 <= data.size(); i++) {
++			if (Rd32(&data[off]) != 0x02014b50u) {
++				break;
++			}
++			ZipEntry e;
++			e.method = Rd16(&data[off + 10]);
++			e.compSize = Rd32(&data[off + 20]);
++			e.uncompSize = Rd32(&data[off + 24]);
++			const uint16_t nlen = Rd16(&data[off + 28]);
++			const uint16_t elen = Rd16(&data[off + 30]);
++			const uint16_t clen = Rd16(&data[off + 32]);
++			e.localOff = Rd32(&data[off + 42]);
++			if (off + 46 + nlen > data.size()) {
++				break;
++			}
++			e.name.assign((const char *)&data[off + 46], nlen);
++			entries[e.name] = e;
++			off += 46u + nlen + elen + clen;
++		}
++		return !entries.empty();
++	}
++
++	bool Read(const std::string &name, std::vector<uint8_t> &out) const
++	{
++		auto it = entries.find(name);
++		if (it == entries.end()) {
++			return false;
++		}
++		const ZipEntry &e = it->second;
++		if (e.localOff + 30 > data.size() || Rd32(&data[e.localOff]) != 0x04034b50u) {
++			return false;
++		}
++		const uint16_t nlen = Rd16(&data[e.localOff + 26]);
++		const uint16_t elen = Rd16(&data[e.localOff + 28]);
++		const size_t start = e.localOff + 30u + nlen + elen;
++		if (start + e.compSize > data.size()) {
++			return false;
++		}
++		if (e.method == 0) {
++			out.assign(data.begin() + start, data.begin() + start + e.compSize);
++			return true;
++		}
++		if (e.method != 8) {
++			return false;
++		}
++		out.assign(e.uncompSize ? e.uncompSize : 1, 0);
++		z_stream zs;
++		memset(&zs, 0, sizeof(zs));
++		if (inflateInit2(&zs, -15) != Z_OK) {
++			return false;
++		}
++		zs.next_in = (Bytef *)&data[start];
++		zs.avail_in = e.compSize;
++		zs.next_out = (Bytef *)out.data();
++		zs.avail_out = (uInt)out.size();
++		int rc = inflate(&zs, Z_FINISH);
++		const size_t produced = out.size() - zs.avail_out;
++		inflateEnd(&zs);
++		out.resize(produced);
++		return rc == Z_STREAM_END || produced == e.uncompSize;
++	}
++
++	bool Has(const std::string &n) const { return entries.count(n) != 0; }
++
++	std::vector<std::string> NamesWithPrefix(const std::string &prefix) const
++	{
++		std::vector<std::string> r;
++		for (const auto &kv : entries) {
++			if (kv.first.compare(0, prefix.size(), prefix) == 0) {
++				r.push_back(kv.first);
++			}
++		}
++		return r;
++	}
++};
++
++/* ============================ 迷你 XML ============================ */
++struct XNode {
++	std::wstring name;
++	std::map<std::wstring, std::wstring> attrs;
++	std::wstring text;
++	std::vector<XNode> kids;
++
++	const XNode *Child(const std::wstring &localName) const
++	{
++		for (const auto &k : kids) {
++			if (LocalName(k.name) == localName) {
++				return &k;
++			}
++		}
++		return nullptr;
++	}
++	std::vector<const XNode *> Children(const std::wstring &localName) const
++	{
++		std::vector<const XNode *> r;
++		for (const auto &k : kids) {
++			if (LocalName(k.name) == localName) {
++				r.push_back(&k);
++			}
++		}
++		return r;
++	}
++	const std::wstring *Attr(const std::wstring &localName) const
++	{
++		/* 1) 优先关系引用（r:id 等）——同一元素常同时有 id 与 r:id */
++		{
++			auto it = attrs.find(L"r:" + localName);
++			if (it != attrs.end()) {
++				return &it->second;
++			}
++		}
++		/* 2) 精确同名 */
++		{
++			auto it = attrs.find(localName);
++			if (it != attrs.end()) {
++				return &it->second;
++			}
++		}
++		/* 3) 任意前缀的本地名匹配 */
++		for (const auto &kv : attrs) {
++			if (LocalName(kv.first) == localName) {
++				return &kv.second;
++			}
++		}
++		return nullptr;
++	}
++
++	static std::wstring LocalName(const std::wstring &n)
++	{
++		const size_t c = n.find(L':');
++		return c == std::wstring::npos ? n : n.substr(c + 1);
++	}
++};
++
++std::wstring Utf8ToW(const std::string &s)
++{
++	if (s.empty()) {
++		return std::wstring();
++	}
++	const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
++	std::wstring w((size_t)n, L'\0');
++	MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
++	return w;
++}
++
++void DecodeEntities(std::wstring &s)
++{
++	struct Rep {
++		const wchar_t *from;
++		const wchar_t *to;
++	};
++	static const Rep reps[] = {{L"&lt;", L"<"}, {L"&gt;", L">"}, {L"&quot;", L"\""}, {L"&apos;", L"'"}, {L"&amp;", L"&"}};
++	for (const auto &r : reps) {
++		size_t p = 0;
++		const size_t fl = wcslen(r.from);
++		while ((p = s.find(r.from, p)) != std::wstring::npos) {
++			s.replace(p, fl, r.to);
++			p += wcslen(r.to);
++		}
++	}
++	/* 数字实体 */
++	size_t p = 0;
++	while ((p = s.find(L"&#", p)) != std::wstring::npos) {
++		const size_t semi = s.find(L';', p);
++		if (semi == std::wstring::npos) {
++			break;
++		}
++		const std::wstring num = s.substr(p + 2, semi - p - 2);
++		wchar_t ch = 0;
++		try {
++			ch = (wchar_t)std::stoi(num[0] == L'x' || num[0] == L'X' ? num.substr(1) : num, nullptr,
++						num[0] == L'x' || num[0] == L'X' ? 16 : 10);
++		} catch (...) {
++			ch = 0;
++		}
++		if (ch) {
++			std::wstring r(1, ch);
++			s.replace(p, semi - p + 1, r);
++			p += 1;
++		} else {
++			p = semi + 1;
++		}
++	}
++}
++
++class XmlParser {
++public:
++	XmlParser(const std::wstring &s) : src(s) {}
++
++	bool Parse(XNode &out)
++	{
++		SkipProlog();
++		if (!ParseElement(out)) {
++			return false;
++		}
++		return true;
++	}
++
++private:
++	const std::wstring &src;
++	size_t i = 0;
++
++	void SkipWs()
++	{
++		while (i < src.size() && (src[i] == L' ' || src[i] == L'\t' || src[i] == L'\r' || src[i] == L'\n')) {
++			i++;
++		}
++	}
++	void SkipProlog()
++	{
++		for (;;) {
++			SkipWs();
++			if (i + 1 < src.size() && src[i] == L'<' && src[i + 1] == L'?') {
++				const size_t e = src.find(L"?>", i);
++				i = (e == std::wstring::npos) ? src.size() : e + 2;
++				continue;
++			}
++			if (i + 3 < src.size() && src.compare(i, 4, L"<!--") == 0) {
++				const size_t e = src.find(L"-->", i);
++				i = (e == std::wstring::npos) ? src.size() : e + 3;
++				continue;
++			}
++			if (i + 8 < src.size() && src.compare(i, 9, L"<!DOCTYPE") == 0) {
++				const size_t e = src.find(L'>', i);
++				i = (e == std::wstring::npos) ? src.size() : e + 1;
++				continue;
++			}
++			break;
++		}
++	}
++	std::wstring ReadName()
++	{
++		const size_t s = i;
++		while (i < src.size() && (iswalnum(src[i]) || src[i] == L'_' || src[i] == L'-' || src[i] == L':' || src[i] == L'.')) {
++			i++;
++		}
++		return src.substr(s, i - s);
++	}
++	bool ParseElement(XNode &node)
++	{
++		SkipWs();
++		if (i >= src.size() || src[i] != L'<') {
++			return false;
++		}
++		i++;
++		node.name = ReadName();
++		/* 属性 */
++		for (;;) {
++			SkipWs();
++			if (i >= src.size()) {
++				return false;
++			}
++			if (src[i] == L'/' && i + 1 < src.size() && src[i + 1] == L'>') {
++				i += 2;
++				return true;
++			}
++			if (src[i] == L'>') {
++				i++;
++				break;
++			}
++			std::wstring an = ReadName();
++			SkipWs();
++			std::wstring av;
++			if (i < src.size() && src[i] == L'=') {
++				i++;
++				SkipWs();
++				if (i < src.size() && (src[i] == L'"' || src[i] == L'\'')) {
++					const wchar_t q = src[i++];
++					const size_t s = i;
++					while (i < src.size() && src[i] != q) {
++						i++;
++					}
++					av = src.substr(s, i - s);
++					if (i < src.size()) {
++						i++;
++					}
++					DecodeEntities(av);
++				}
++			}
++			if (!an.empty()) {
++				node.attrs[an] = av;
++			}
++		}
++		/* 子节点/文本 */
++		std::wstring text;
++		for (;;) {
++			const size_t lt = src.find(L'<', i);
++			if (lt == std::wstring::npos) {
++				text += src.substr(i);
++				i = src.size();
++				break;
++			}
++			text += src.substr(i, lt - i);
++			i = lt;
++			if (i + 3 < src.size() && src.compare(i, 4, L"<!--") == 0) {
++				const size_t e = src.find(L"-->", i);
++				i = (e == std::wstring::npos) ? src.size() : e + 3;
++				continue;
++			}
++			if (i + 8 < src.size() && src.compare(i, 9, L"<![CDATA[") == 0) {
++				const size_t e = src.find(L"]]>", i);
++				if (e == std::wstring::npos) {
++					i = src.size();
++					break;
++				}
++				text += src.substr(i + 9, e - i - 9);
++				i = e + 3;
++				continue;
++			}
++			if (i + 1 < src.size() && src[i + 1] == L'/') {
++				const size_t e = src.find(L'>', i);
++				i = (e == std::wstring::npos) ? src.size() : e + 1;
++				break;
++			}
++			XNode kid;
++			if (!ParseElement(kid)) {
++				break;
++			}
++			node.kids.push_back(std::move(kid));
++		}
++		node.text = text;
++		DecodeEntities(node.text);
++		return true;
++	}
++};
++
++/* ============================ 工具 ============================ */
++bool ParseXml(const std::vector<uint8_t> &bytes, XNode &out)
++{
++	std::wstring w = Utf8ToW(std::string((const char *)bytes.data(), bytes.size()));
++	/* 去 BOM */
++	if (!w.empty() && w[0] == 0xFEFF) {
++		w.erase(0, 1);
++	}
++	XmlParser p(w);
++	return p.Parse(out);
++}
++
++int64_t ToI64(const std::wstring *s, int64_t def = 0)
++{
++	if (!s || s->empty()) {
++		return def;
++	}
++	try {
++		return (int64_t)_wtoi64(s->c_str());
++	} catch (...) {
++		return def;
++	}
++}
++
++double ToD(const std::wstring *s, double def = 0.0)
++{
++	if (!s || s->empty()) {
++		return def;
++	}
++	return _wtof(s->c_str());
++}
++
++Color ParseColor(const XNode *fillNode, const std::map<std::wstring, std::wstring> &theme)
++{
++	Color c;
++	if (!fillNode) {
++		return c;
++	}
++	if (const XNode *srgb = fillNode->Child(L"srgbClr")) {
++		if (const std::wstring *v = srgb->Attr(L"val")) {
++			uint32_t rgb = (uint32_t)wcstoul(v->c_str(), nullptr, 16);
++			c.argb = 0xFF000000u | (rgb & 0xFFFFFFu);
++			c.valid = true;
++			return c;
++		}
++	}
++	if (const XNode *sc = fillNode->Child(L"schemeClr")) {
++		if (const std::wstring *v = sc->Attr(L"val")) {
++			auto it = theme.find(*v);
++			if (it != theme.end()) {
++				uint32_t rgb = (uint32_t)wcstoul(it->second.c_str(), nullptr, 16);
++				c.argb = 0xFF000000u | (rgb & 0xFFFFFFu);
++				c.valid = true;
++			}
++		}
++	}
++	if (const XNode *pc = fillNode->Child(L"prstClr")) {
++		if (const std::wstring *v = pc->Attr(L"val")) {
++			if (*v == L"white") {
++				c.argb = 0xFFFFFFFFu;
++				c.valid = true;
++			} else if (*v == L"black") {
++				c.argb = 0xFF000000u;
++				c.valid = true;
++			}
++		}
++	}
++	return c;
++}
++
++void ParseTextBody(const XNode *txBody, Shape &sh, const std::map<std::wstring, std::wstring> &theme)
++{
++	if (!txBody) {
++		return;
++	}
++	for (const XNode *p : txBody->Children(L"p")) {
++		Para para;
++		if (const XNode *ppr = p->Child(L"pPr")) {
++			if (const std::wstring *a = ppr->Attr(L"algn")) {
++				if (*a == L"ctr") {
++					para.align = 1;
++				} else if (*a == L"r") {
++					para.align = 2;
++				} else if (*a == L"just") {
++					para.align = 3;
++				}
++			}
++			para.level = (int)ToI64(ppr->Attr(L"lvl"));
++			para.bullet = ppr->Child(L"buChar") != nullptr || ppr->Child(L"buAutoNum") != nullptr;
++			if (const XNode *ln = ppr->Child(L"lnSpc")) {
++				if (const XNode *pct = ln->Child(L"spcPct")) {
++					para.lineSpacing = ToD(pct->Attr(L"val"), 100000.0) / 100000.0;
++				}
++			}
++		}
++		/* 段落级默认 run 属性 */
++		for (const XNode *r : p->Children(L"r")) {
++			Run run;
++			if (const XNode *rpr = r->Child(L"rPr")) {
++				if (const std::wstring *sz = rpr->Attr(L"sz")) {
++					run.sizePt = _wtof(sz->c_str()) / 100.0;
++				}
++				if (const std::wstring *b = rpr->Attr(L"b")) {
++					run.bold = (*b == L"1" || *b == L"true");
++				}
++				if (const std::wstring *it2 = rpr->Attr(L"i")) {
++					run.italic = (*it2 == L"1" || *it2 == L"true");
++				}
++				if (const std::wstring *u = rpr->Attr(L"u")) {
++					run.underline = (*u != L"none");
++				}
++				run.color = ParseColor(rpr->Child(L"solidFill"), theme);
++				if (const XNode *latin = rpr->Child(L"latin")) {
++					if (const std::wstring *tf = latin->Attr(L"typeface")) {
++						run.latin = *tf;
++					}
++				}
++				if (const XNode *ea = rpr->Child(L"ea")) {
++					if (const std::wstring *tf = ea->Attr(L"typeface")) {
++						run.ea = *tf;
++					}
++				}
++			}
++			if (const XNode *t = r->Child(L"t")) {
++				run.text = t->text;
++			}
++			if (!run.text.empty()) {
++				para.runs.push_back(run);
++			}
++		}
++		if (const XNode *fld = p->Child(L"fld")) {
++			Run run;
++			run.text = L"[字段]";
++			para.runs.push_back(run);
++		}
++		sh.paras.push_back(std::move(para));
++	}
++}
++
++void ParseShapeTree(const XNode *spTree, std::vector<Shape> &out, const std::map<std::wstring, std::wstring> &theme);
++
++void ParseShapeCommon(const XNode *node, Shape &sh, const std::map<std::wstring, std::wstring> &theme)
++{
++	if (const XNode *nv = node->Child(L"nvSpPr")) {
++		if (const XNode *cnv = nv->Child(L"cNvPr")) {
++			if (const std::wstring *n = cnv->Attr(L"name")) {
++				sh.name = *n;
++			}
++		}
++		if (const XNode *ph = nv->Child(L"nvPr")) {
++			if (const XNode *p = ph->Child(L"ph")) {
++				sh.isPlaceholder = true;
++				if (const std::wstring *t = p->Attr(L"type")) {
++					sh.phType = *t;
++				}
++			}
++		}
++	}
++	const XNode *spPr = node->Child(L"spPr");
++	if (spPr) {
++		if (const XNode *xfrm = spPr->Child(L"xfrm")) {
++			if (const XNode *off = xfrm->Child(L"off")) {
++				sh.x = ToI64(off->Attr(L"x"));
++				sh.y = ToI64(off->Attr(L"y"));
++			}
++			if (const XNode *ext = xfrm->Child(L"ext")) {
++				sh.w = ToI64(ext->Attr(L"cx"));
++				sh.h = ToI64(ext->Attr(L"cy"));
++			}
++			sh.rot = ToI64(xfrm->Attr(L"rot"));
++		}
++		if (const XNode *g = spPr->Child(L"prstGeom")) {
++			if (const std::wstring *p = g->Attr(L"prst")) {
++				sh.prstGeom = *p;
++			}
++		}
++		if (const XNode *f = spPr->Child(L"solidFill")) {
++			sh.fill = ParseColor(f, theme);
++			sh.hasFill = sh.fill.valid;
++		}
++		if (const XNode *ln = spPr->Child(L"ln")) {
++			sh.line = ParseColor(ln, theme);
++			sh.hasLine = sh.line.valid;
++			if (const std::wstring *w = ln->Attr(L"w")) {
++				sh.lineW = ToI64(w);
++			}
++		}
++	}
++}
++
++void ParseShapeTree(const XNode *spTree, std::vector<Shape> &out, const std::map<std::wstring, std::wstring> &theme)
++{
++	if (!spTree) {
++		return;
++	}
++	for (const XNode &k : spTree->kids) {
++		const std::wstring ln = XNode::LocalName(k.name);
++		if (ln == L"sp") {
++			Shape sh;
++			sh.kind = Shape::Kind::AutoShape;
++			ParseShapeCommon(&k, sh, theme);
++			const XNode *tx = k.Child(L"txBody");
++			if (tx) {
++				ParseTextBody(tx, sh, theme);
++				if (!sh.paras.empty() && sh.prstGeom.empty()) {
++					sh.kind = Shape::Kind::TextBox;
++				}
++			}
++			if (!sh.prstGeom.empty() && sh.prstGeom != L"rect") {
++				sh.kind = Shape::Kind::AutoShape;
++			}
++			out.push_back(std::move(sh));
++		} else if (ln == L"pic") {
++			Shape sh;
++			sh.kind = Shape::Kind::Picture;
++			ParseShapeCommon(&k, sh, theme);
++			if (const XNode *bf = k.Child(L"blipFill")) {
++				if (const XNode *blip = bf->Child(L"blip")) {
++					if (const std::wstring *e = blip->Attr(L"embed")) {
++						sh.imageRelId = *e;
++					}
++				}
++			}
++			out.push_back(std::move(sh));
++		} else if (ln == L"graphicFrame") {
++			Shape sh;
++			ParseShapeCommon(&k, sh, theme);
++			const XNode *gf = k.Child(L"xfrm");
++			if (gf) {
++				if (const XNode *off = gf->Child(L"off")) {
++					sh.x = ToI64(off->Attr(L"x"));
++					sh.y = ToI64(off->Attr(L"y"));
++				}
++				if (const XNode *ext = gf->Child(L"ext")) {
++					sh.w = ToI64(ext->Attr(L"cx"));
++					sh.h = ToI64(ext->Attr(L"cy"));
++				}
++			}
++			if (k.Child(L"graphic")) {
++				const XNode *g = k.Child(L"graphic");
++				const XNode *gd = g->Child(L"graphicData");
++				if (gd) {
++					if (gd->Child(L"tbl")) {
++						sh.kind = Shape::Kind::Table;
++					} else if (gd->Child(L"chart")) {
++						sh.kind = Shape::Kind::Chart;
++					} else {
++						sh.kind = Shape::Kind::Unknown;
++					}
++				}
++			}
++			out.push_back(std::move(sh));
++		} else if (ln == L"grpSp") {
++			Shape sh;
++			sh.kind = Shape::Kind::Group;
++			ParseShapeCommon(&k, sh, theme);
++			if (const XNode *gsp = k.Child(L"grpSpPr")) {
++				if (const XNode *xfrm = gsp->Child(L"xfrm")) {
++					if (const XNode *off = xfrm->Child(L"off")) {
++						sh.x = ToI64(off->Attr(L"x"));
++						sh.y = ToI64(off->Attr(L"y"));
++					}
++					if (const XNode *ext = xfrm->Child(L"ext")) {
++						sh.w = ToI64(ext->Attr(L"cx"));
++						sh.h = ToI64(ext->Attr(L"cy"));
++					}
++				}
++			}
++			ParseShapeTree(&k, sh.children, theme);
++			out.push_back(std::move(sh));
++		} else if (ln == L"cxnSp") {
++			Shape sh;
++			sh.kind = Shape::Kind::AutoShape;
++			ParseShapeCommon(&k, sh, theme);
++			out.push_back(std::move(sh));
++		}
++	}
++}
++
++/* rels: 解析 ppt/slides/_rels/slideN.xml.rels → id -> target */
++void ParseRels(const XNode &root, std::map<std::wstring, std::wstring> &out)
++{
++	for (const XNode *rel : root.Children(L"Relationship")) {
++		const std::wstring *id = rel->Attr(L"Id");
++		const std::wstring *tg = rel->Attr(L"Target");
++		if (id && tg) {
++			out[*id] = *tg;
++		}
++	}
++}
++
++std::string NormalizeTarget(const std::string &slidePart, const std::string &target)
++{
++	/* slidePart 例："ppt/slides/slide1.xml" */
++	if (target.empty()) {
++		return target;
++	}
++	if (target[0] == '/') {
++		return target.substr(1);
++	}
++	std::string base = slidePart;
++	const size_t slash = base.find_last_of('/');
++	base = (slash == std::string::npos) ? std::string() : base.substr(0, slash + 1);
++	std::string joined = base + target;
++	/* 处理 ../ */
++	std::vector<std::string> parts;
++	std::stringstream ss(joined);
++	std::string seg;
++	while (std::getline(ss, seg, '/')) {
++		if (seg == "..") {
++			if (!parts.empty()) {
++				parts.pop_back();
++			}
++		} else if (seg != "." && !seg.empty()) {
++			parts.push_back(seg);
++		}
++	}
++	std::string r;
++	for (size_t i = 0; i < parts.size(); i++) {
++		if (i) {
++			r += "/";
++		}
++		r += parts[i];
++	}
++	return r;
++}
++
++} // namespace
++
++bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err)
++{
++	Zip zip;
++	if (!zip.Open(pptxPath)) {
++		err = L"无法读取 pptx（zip 打开失败）";
++		return false;
++	}
++
++	/* 主题：字体与配色 */
++	std::map<std::wstring, std::wstring> theme;
++	{
++		std::vector<uint8_t> b;
++		if (zip.Read("ppt/theme/theme1.xml", b)) {
++			XNode root;
++			if (ParseXml(b, root)) {
++				if (const XNode *cs = root.Child(L"themeElements")) {
++					if (const XNode *clr = cs->Child(L"clrScheme")) {
++						for (const XNode &c : clr->kids) {
++							const std::wstring name = XNode::LocalName(c.name);
++							const XNode *v = c.kids.empty() ? nullptr : &c.kids[0];
++							if (!v) {
++								continue;
++							}
++							const std::wstring *val = v->Attr(L"val") ? v->Attr(L"val") : v->Attr(L"lastClr");
++							if (val) {
++								theme[name] = *val;
++							}
++						}
++					}
++					if (const XNode *fs = cs->Child(L"fontScheme")) {
++						if (const XNode *mj = fs->Child(L"majorFont")) {
++							if (const XNode *lt = mj->Child(L"latin")) {
++								if (const std::wstring *tf = lt->Attr(L"typeface")) {
++									out.majorFont = *tf;
++								}
++							}
++						}
++						if (const XNode *mn = fs->Child(L"minorFont")) {
++							if (const XNode *lt = mn->Child(L"latin")) {
++								if (const std::wstring *tf = lt->Attr(L"typeface")) {
++									out.minorFont = *tf;
++								}
++							}
++						}
++					}
++				}
++			}
++		}
++	}
++	out.themeColors = theme;
++
++	/* presentation.xml：页面尺寸 + 幻灯片顺序 */
++	std::vector<std::string> slideParts;
++	size_t dbgRelsRead = 0, dbgRelsCount = 0, dbgNoRid = 0;
++	size_t dbgSldIds = 0, dbgRelHit = 0, dbgSlidesUnreadable = 0, dbgSlidesUnparsed = 0, dbgNoSpTree = 0;
++	std::wstring dbgFirstRelId, dbgFirstSldRid;
++	{
++		std::vector<uint8_t> b;
++		if (!zip.Read("ppt/presentation.xml", b)) {
++			err = L"缺少 ppt/presentation.xml（不是有效的 pptx）";
++			return false;
++		}
++		XNode root;
++		if (!ParseXml(b, root)) {
++			err = L"presentation.xml 解析失败";
++			return false;
++		}
++		if (const XNode *sz = root.Child(L"sldSz")) {
++			out.slideW = ToI64(sz->Attr(L"cx"), out.slideW);
++			out.slideH = ToI64(sz->Attr(L"cy"), out.slideH);
++		}
++		std::map<std::wstring, std::wstring> presRels;
++		std::vector<uint8_t> rb;
++		if (zip.Read("ppt/_rels/presentation.xml.rels", rb)) {
++			dbgRelsRead = 1;
++			XNode rr;
++			if (ParseXml(rb, rr)) {
++				ParseRels(rr, presRels);
++				dbgRelsCount = presRels.size();
++				if (!presRels.empty()) {
++					dbgFirstRelId = presRels.begin()->first;
++				}
++			}
++		}
++		if (const XNode *lst = root.Child(L"sldIdLst")) {
++			for (const XNode *sid : lst->Children(L"sldId")) {
++				dbgSldIds++;
++				const std::wstring *rid = sid->Attr(L"id");
++				if (!rid) {
++					dbgNoRid++;
++					continue;
++				}
++				if (dbgFirstSldRid.empty()) {
++					dbgFirstSldRid = *rid;
++				}
++				auto it = presRels.find(*rid);
++				if (it == presRels.end()) {
++					continue;
++				}
++				dbgRelHit++;
++				slideParts.push_back(NormalizeTarget("ppt/presentation.xml", std::string(it->second.begin(), it->second.end())));
++			}
++		}
++	}
++
++	/* 逐个 slide */
++	for (const std::string &part : slideParts) {
++		std::vector<uint8_t> b;
++		if (!zip.Read(part, b)) {
++			dbgSlidesUnreadable++;
++			continue;
++		}
++		XNode root;
++		if (!ParseXml(b, root)) {
++			dbgSlidesUnparsed++;
++			continue;
++		}
++		Slide slide;
++		/* rels → 图片 */
++		std::map<std::wstring, std::wstring> rels;
++		{
++			const std::string slash = part.substr(0, part.find_last_of('/'));
++			const std::string fileName = part.substr(part.find_last_of('/') + 1);
++			std::vector<uint8_t> rb;
++			if (zip.Read(slash + "/_rels/" + fileName + ".rels", rb)) {
++				XNode rr;
++				if (ParseXml(rb, rr)) {
++					ParseRels(rr, rels);
++				}
++			}
++		}
++		const XNode *spTree = root.Child(L"cSld") ? root.Child(L"cSld")->Child(L"spTree") : root.Child(L"spTree");
++		if (!spTree) {
++			dbgNoSpTree++;
++		}
++		ParseShapeTree(spTree, slide.shapes, theme);
++
++		/* 解析图片数据 */
++		for (Shape &sh : slide.shapes) {
++			if (sh.imageRelId.empty()) {
++				continue;
++			}
++			auto it = rels.find(sh.imageRelId);
++			if (it == rels.end()) {
++				continue;
++			}
++			const std::string target = NormalizeTarget(part, std::string(it->second.begin(), it->second.end()));
++			std::vector<uint8_t> img;
++			if (zip.Read(target, img)) {
++				sh.imageData = std::move(img);
++				sh.hasImage = !sh.imageData.empty();
++				const size_t d = target.find_last_of('.');
++				if (d != std::string::npos) {
++					sh.imageExt = Utf8ToW(target.substr(d + 1));
++				}
++			}
++		}
++		out.slides.push_back(std::move(slide));
++	}
++
++	if (out.slides.empty()) {
++		wchar_t buf[256];
++		swprintf(buf, 256, L"未解析到任何幻灯片（rels=%zu 条数=%zu 首Id=%ls | sldId=%zu 首rid=%ls 无rid=%zu 命中=%zu parts=%zu）",
++			 dbgRelsRead, dbgRelsCount, dbgFirstRelId.c_str(), dbgSldIds, dbgFirstSldRid.c_str(), dbgNoRid, dbgRelHit,
++			 slideParts.size());
++		err = buf;
++		return false;
++	}
++	return true;
++}
++
++std::string DeckSummary(const Deck &deck)
++{
++	std::ostringstream o;
++	o << "slideSize=" << deck.slideW << "x" << deck.slideH << " EMU ("
++	  << (double)deck.slideW / 914400.0 << "in x " << (double)deck.slideH / 914400.0 << "in)\n";
++	o << "slides=" << deck.slides.size() << " themeColors=" << deck.themeColors.size() << " majorFont="
++	  << std::string(deck.majorFont.begin(), deck.majorFont.end()) << "\n";
++	for (size_t i = 0; i < deck.slides.size(); i++) {
++		const Slide &s = deck.slides[i];
++		o << "  slide " << (i + 1) << ": shapes=" << s.shapes.size() << "\n";
++		int shown = 0;
++		for (const Shape &sh : s.shapes) {
++			if (shown++ >= 12) {
++				o << "    ...\n";
++				break;
++			}
++			const char *kind = "?";
++			switch (sh.kind) {
++			case Shape::Kind::AutoShape: kind = "shape"; break;
++			case Shape::Kind::TextBox: kind = "text"; break;
++			case Shape::Kind::Picture: kind = "pic"; break;
++			case Shape::Kind::Group: kind = "group"; break;
++			case Shape::Kind::Table: kind = "table"; break;
++			case Shape::Kind::Chart: kind = "chart"; break;
++			case Shape::Kind::Media: kind = "media"; break;
++			default: kind = "unknown"; break;
++			}
++			o << "    [" << kind << "] geom=" << std::string(sh.prstGeom.begin(), sh.prstGeom.end())
++			  << " pos=(" << sh.x << "," << sh.y << ") size=(" << sh.w << "x" << sh.h << ")"
++			  << (sh.hasFill ? " fill=1" : " fill=0")
++			  << (sh.hasImage ? " img=1" : "") << (sh.imageData.empty() ? "" : " imgBytes=" + std::to_string(sh.imageData.size()));
++			size_t total = 0;
++			for (const Para &p : sh.paras) {
++				for (const Run &r : p.runs) {
++					total += r.text.size();
++				}
++			}
++			if (total) {
++				o << " runs=" << sh.paras.size() << " chars=" << total;
++			}
++			o << "\n";
++		}
++	}
++	return o.str();
++}
++
++} // namespace hfr
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+new file mode 100644
+index 0000000..0747a0b
+--- /dev/null
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -0,0 +1,76 @@
++#pragma once
++/* HFRDeck —— 自研 PPT 引擎（M0）文档模型与 OOXML 解析
++ * 依赖：zlib（OBS 依赖包已提供）。不依赖 Qt / OBS，便于独立验证。 */
++#include <cstdint>
++#include <map>
++#include <string>
++#include <vector>
++
++namespace hfr {
++
++struct Color {
++	bool valid = false;
++	uint32_t argb = 0xFF000000u;
++};
++
++struct Run {
++	std::wstring text;
++	double sizePt = 18.0;
++	bool bold = false;
++	bool italic = false;
++	bool underline = false;
++	Color color;
++	std::wstring latin;   /* 西文字体 */
++	std::wstring ea;      /* 东亚字体 */
++};
++
++struct Para {
++	std::vector<Run> runs;
++	int align = 0;        /* 0=left 1=center 2=right 3=justify */
++	int level = 0;
++	bool bullet = false;
++	double lineSpacing = 1.0;
++};
++
++struct Shape {
++	enum class Kind { Unknown, AutoShape, TextBox, Placeholder, Picture, Group, Table, Chart, Media };
++	Kind kind = Kind::Unknown;
++	std::wstring name;
++	int64_t x = 0, y = 0, w = 0, h = 0; /* EMU */
++	int64_t rot = 0;                    /* 1/60000 度 */
++	bool hasFill = false;
++	Color fill;
++	bool hasLine = false;
++	Color line;
++	int64_t lineW = 9525;               /* EMU, 默认 0.75pt */
++	std::wstring prstGeom;              /* rect / roundRect / ellipse ... */
++	std::vector<Para> paras;
++	std::wstring imageRelId;
++	std::vector<uint8_t> imageData;     /* 已解析的图片字节 */
++	std::wstring imageExt;
++	bool hasImage = false;
++	bool isPlaceholder = false;
++	std::wstring phType;
++	std::vector<Shape> children;        /* 组合 */
++};
++
++struct Slide {
++	std::vector<Shape> shapes;
++	std::wstring notes;
++};
++
++struct Deck {
++	int64_t slideW = 12192000, slideH = 6858000; /* EMU */
++	std::vector<Slide> slides;
++	std::wstring majorFont, minorFont;
++	std::map<std::wstring, std::wstring> themeColors; /* dk1/lt1/accent1.. */
++	std::wstring officeThemeName;
++};
++
++/* 解析 pptx。失败时返回 false 并写入 err。 */
++bool LoadDeck(const std::wstring &pptxPath, Deck &out, std::wstring &err);
++
++/* 调试用：把 Deck 摘要成文本 */
++std::string DeckSummary(const Deck &deck);
++
++} // namespace hfr
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRDeckDump.cpp b/frontend/widgets/HFRDeckDump.cpp
+new file mode 100644
+index 0000000..af36c96
+--- /dev/null
++++ b/frontend/widgets/HFRDeckDump.cpp
+@@ -0,0 +1,34 @@
++/* 独立验证：解析 pptx 并打印摘要（不依赖 OBS，便于快速迭代） */
++#include "HFRDeck.hpp"
++
++#include <windows.h>
++#include <cstdio>
++#include <string>
++
++static std::string ToUtf8(const std::wstring &w)
++{
++	if (w.empty()) {
++		return std::string();
++	}
++	const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
++	std::string s((size_t)n, '\0');
++	WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
++	return s;
++}
++
++int wmain(int argc, wchar_t **argv)
++{
++	SetConsoleOutputCP(CP_UTF8);
++	if (argc < 2) {
++		printf("usage: hfr_deck_dump <file.pptx>\n");
++		return 2;
++	}
++	hfr::Deck deck;
++	std::wstring err;
++	if (!hfr::LoadDeck(argv[1], deck, err)) {
++		printf("FAILED: %s\n", ToUtf8(err).c_str());
++		return 1;
++	}
++	printf("OK\n%s", hfr::DeckSummary(deck).c_str());
++	return 0;
++}
+-- 
+2.56.0.windows.2
+

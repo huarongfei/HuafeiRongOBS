@@ -1,7 +1,7 @@
 From 9eba3e56bb8440c7767ec128b236c886a2485b4c Mon Sep 17 00:00:00 2001
 From: HuafeirongOBS <dev@huafeirong.local>
 Date: Sun, 6 Sep 2026 06:28:58 +0800
-Subject: [PATCH 02/32] fix(M1): close E1/E2 demo windows on aboutToQuit before
+Subject: [PATCH 02/33] fix(M1): close E1/E2 demo windows on aboutToQuit before
  obs_shutdown (shutdown c0000005)
 
 ---
@@ -69,5 +69,5 @@ index 4d2f8e2..cde7fba 100644
  
  	/* hack to prevent elgato from loading its own QtNetwork that it tries
 -- 
-2.55.0.windows.5
+2.56.0.windows.2
 
