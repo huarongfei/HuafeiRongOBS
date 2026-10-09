@@ -1,7 +1,7 @@
 From fbec4511be6c35e181a74addb829e189e60d1fdb Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 9 Oct 2026 23:22:00 +0800
-Subject: [PATCH 33/39] =?UTF-8?q?feat(slides):=20M0=20parser=20=E2=80=94?=
+Subject: [PATCH 33/40] =?UTF-8?q?feat(slides):=20M0=20parser=20=E2=80=94?=
  =?UTF-8?q?=20self-contained=20zip(zlib)+mini-XML=20OOXML=20reader=20produ?=
  =?UTF-8?q?cing=20deck=20model=20(shapes/text/images/tables/theme);=20stan?=
  =?UTF-8?q?dalone=20dump=20tool=20for=20verification?=

@@ -1,0 +1,184 @@
+From e0b1921b6a271b5797fd4ed5189043426e8d7d5d Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Sat, 10 Oct 2026 00:27:01 +0800
+Subject: [PATCH 40/40] feat(slides): real gradient fill rendering (gradFill
+ stops + angle, CPU gradient texture, GPU draw)
+
+---
+ frontend/widgets/HFRDeck.cpp         | 20 +++++++++
+ frontend/widgets/HFRDeck.hpp         |  8 ++++
+ frontend/widgets/HFRDeckRender.cpp   | 66 +++++++++++++++++++++++++++-
+ frontend/widgets/HFRDeckRender.hpp   |  2 +-
+ frontend/widgets/HFRSlidesSource.cpp |  2 +-
+ 5 files changed, 95 insertions(+), 3 deletions(-)
+
+diff --git a/frontend/widgets/HFRDeck.cpp b/frontend/widgets/HFRDeck.cpp
+index 08585f3..4e3f501 100644
+--- a/frontend/widgets/HFRDeck.cpp
++++ b/frontend/widgets/HFRDeck.cpp
+@@ -964,6 +964,26 @@ void ParseShapeCommon(const XNode *node, Shape &sh, const std::map<std::wstring,
+ 			sh.fill = ParseColor(f, theme);
+ 			sh.hasFill = sh.fill.valid;
+ 		}
++		if (const XNode *gf = spPr->Child(L"gradFill")) {
++			if (const XNode *lst = gf->Child(L"gsLst")) {
++				for (const XNode *gs : lst->Children(L"gs")) {
++					GradientStop st;
++					st.pos = ToD(gs->Attr(L"pos"), 0.0) / 100000.0;
++					st.color = ParseColor(gs, theme);
++					if (st.color.valid) {
++						sh.gradStops.push_back(st);
++					}
++				}
++			}
++			if (const XNode *lin = gf->Child(L"lin")) {
++				sh.gradAngleDeg = ToD(lin->Attr(L"ang"), 5400000.0) / 60000.0;
++			}
++			if (!sh.gradStops.empty()) {
++				sh.hasFill = true;
++				sh.fill = sh.gradStops[0].color;
++				sh.hasGradient = (sh.gradStops.size() >= 2);
++			}
++		}
+ 		if (const XNode *ln = spPr->Child(L"ln")) {
+ 			sh.line = ParseColor(ln, theme);
+ 			sh.hasLine = sh.line.valid;
+diff --git a/frontend/widgets/HFRDeck.hpp b/frontend/widgets/HFRDeck.hpp
+index e307f7e..82295a6 100644
+--- a/frontend/widgets/HFRDeck.hpp
++++ b/frontend/widgets/HFRDeck.hpp
+@@ -60,6 +60,11 @@ struct Anim {
+ 	double delayMs = 0.0;
+ };
+ 
++struct GradientStop {
++	double pos = 0.0; /* 0..1 */
++	Color color;
++};
++
+ struct TableCell {
+ 	std::vector<Para> paras;
+ 	bool hasFill = false;
+@@ -76,6 +81,9 @@ struct Shape {
+ 	int64_t rot = 0;                    /* 1/60000 度 */
+ 	bool hasFill = false;
+ 	Color fill;
++	bool hasGradient = false;
++	std::vector<GradientStop> gradStops;
++	double gradAngleDeg = 90.0; /* 0=向右，90=向下（由 lin@ang 换算） */
+ 	bool hasLine = false;
+ 	Color line;
+ 	int64_t lineW = 9525;               /* EMU, 默认 0.75pt */
+diff --git a/frontend/widgets/HFRDeckRender.cpp b/frontend/widgets/HFRDeckRender.cpp
+index 4ab257d..080b65b 100644
+--- a/frontend/widgets/HFRDeckRender.cpp
++++ b/frontend/widgets/HFRDeckRender.cpp
+@@ -264,7 +264,57 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		out.items.push_back(std::move(it));
+ 		return;
+ 	}
+-	if (sh.hasFill) {
++	/* 渐变填充：CPU 生成渐变位图（限制到合理分辨率） */
++	if (sh.hasGradient && sh.gradStops.size() >= 2) {
++		const int gw = std::max(2, std::min(w, 1024));
++		const int gh = std::max(2, std::min(h, 1024));
++		Item it;
++		it.kind = ItemKind::Gradient;
++		it.x = x;
++		it.y = y;
++		it.w = w;
++		it.h = h;
++		it.shapeIndex = shapeIndex;
++		it.rot60k = (int)sh.rot;
++		it.debug = sh.name;
++		it.pix.assign((size_t)gw * gh * 4, 0);
++		const double rad = sh.gradAngleDeg * 3.14159265358979 / 180.0;
++		const double ux = cos(rad), uy = sin(rad);
++		for (int py = 0; py < gh; py++) {
++			for (int px = 0; px < gw; px++) {
++				const double nx = (double)px / (double)(gw - 1);
++				const double ny = (double)py / (double)(gh - 1);
++				double t = nx * ux + ny * uy;
++				t = std::max(0.0, std::min(1.0, t));
++				/* 找到 t 所在区间并插值 */
++				const GradientStop *a = &sh.gradStops[0];
++				const GradientStop *b = &sh.gradStops[sh.gradStops.size() - 1];
++				for (size_t i = 0; i + 1 < sh.gradStops.size(); i++) {
++					if (t >= sh.gradStops[i].pos && t <= sh.gradStops[i + 1].pos) {
++						a = &sh.gradStops[i];
++						b = &sh.gradStops[i + 1];
++						break;
++					}
++				}
++				const double span = (b->pos - a->pos);
++				const double f = (span > 1e-6) ? ((t - a->pos) / span) : 0.0;
++				const uint8_t ar = (uint8_t)((a->color.argb >> 16) & 0xFF);
++				const uint8_t ag = (uint8_t)((a->color.argb >> 8) & 0xFF);
++				const uint8_t ab = (uint8_t)(a->color.argb & 0xFF);
++				const uint8_t br = (uint8_t)((b->color.argb >> 16) & 0xFF);
++				const uint8_t bg = (uint8_t)((b->color.argb >> 8) & 0xFF);
++				const uint8_t bb = (uint8_t)(b->color.argb & 0xFF);
++				const size_t idx = ((size_t)py * gw + (size_t)px) * 4;
++				it.pix[idx + 0] = (uint8_t)(ab + (bb - ab) * f);
++				it.pix[idx + 1] = (uint8_t)(ag + (bg - ag) * f);
++				it.pix[idx + 2] = (uint8_t)(ar + (br - ar) * f);
++				it.pix[idx + 3] = 255;
++			}
++		}
++		it.texW = gw;
++		it.texH = gh;
++		out.items.push_back(std::move(it));
++	} else if (sh.hasFill) {
+ 		Item it;
+ 		it.kind = ItemKind::Rect;
+ 		it.x = x;
+@@ -474,6 +524,20 @@ void CompositeToBgra(const RenderSlide &slide, std::vector<uint8_t> &bgra)
+ 					}
+ 				}
+ 			}
++		} else if (it.kind == ItemKind::Gradient) {
++			for (int y = 0; y < it.texH; y++) {
++				for (int x = 0; x < it.texW; x++) {
++					const size_t si = ((size_t)y * it.texW + (size_t)x) * 4;
++					const uint32_t c = 0xFF000000u | ((uint32_t)it.pix[si + 2] << 16) |
++							   ((uint32_t)it.pix[si + 1] << 8) | (uint32_t)it.pix[si + 0];
++					/* 位图按形状尺寸拉伸到目标区域 */
++					const double sx = (double)it.texW / (double)std::max(1, it.w);
++					const double sy = (double)it.texH / (double)std::max(1, it.h);
++					const int dx = it.x + (int)((double)x / sx);
++					const int dy = it.y + (int)((double)y / sy);
++					BlendPixel(bgra, W, dx, dy, c, 255);
++				}
++			}
+ 		} else if (it.kind == ItemKind::Text) {
+ 			for (int y = 0; y < it.texH; y++) {
+ 				for (int x = 0; x < it.texW; x++) {
+diff --git a/frontend/widgets/HFRDeckRender.hpp b/frontend/widgets/HFRDeckRender.hpp
+index 00e66ef..5a02867 100644
+--- a/frontend/widgets/HFRDeckRender.hpp
++++ b/frontend/widgets/HFRDeckRender.hpp
+@@ -9,7 +9,7 @@
+ 
+ namespace hfr {
+ 
+-enum class ItemKind { Rect, Picture, Text, Table };
++enum class ItemKind { Rect, Picture, Text, Table, Gradient };
+ 
+ struct Item {
+ 	ItemKind kind = ItemKind::Rect;
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+index 711a98b..6620605 100644
+--- a/frontend/widgets/HFRSlidesSource.cpp
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -238,7 +238,7 @@ static void hfr_slides_upload(HfrSlidesCtx *ctx)
+ 		if (it.kind == hfr::ItemKind::Rect) {
+ 			uint32_t px = it.color;
+ 			g.tex = gs_texture_create(1, 1, GS_BGRA, 1, (const uint8_t **)&px, 0);
+-		} else if (it.kind == hfr::ItemKind::Text) {
++		} else if (it.kind == hfr::ItemKind::Text || it.kind == hfr::ItemKind::Gradient) {
+ 			if (!it.pix.empty() && it.texW > 0 && it.texH > 0) {
+ 				const uint8_t *data = it.pix.data();
+ 				g.tex = gs_texture_create((uint32_t)it.texW, (uint32_t)it.texH, GS_BGRA, 1, &data, 0);
+-- 
+2.56.0.windows.2
+

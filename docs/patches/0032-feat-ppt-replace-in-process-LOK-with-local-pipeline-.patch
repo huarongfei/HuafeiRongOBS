@@ -1,7 +1,7 @@
 From 40db336311204adfb4a779c4edb0a6f63d007f85 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Fri, 25 Sep 2026 20:25:46 +0800
-Subject: [PATCH 32/39] =?UTF-8?q?feat(ppt)!:=20replace=20in-process=20LOK?=
+Subject: [PATCH 32/40] =?UTF-8?q?feat(ppt)!:=20replace=20in-process=20LOK?=
  =?UTF-8?q?=20with=20local=20pipeline=20=E2=80=94=20soffice=20--headless?=
  =?UTF-8?q?=20pptx->pdf=20(one-shot,=20no=20bridge)=20+=20in-process=20pdf?=
  =?UTF-8?q?ium=20page=20rendering=20(embedded=20fonts,=20stable=20C=20API)?=

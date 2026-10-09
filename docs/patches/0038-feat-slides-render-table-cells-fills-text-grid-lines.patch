@@ -1,7 +1,7 @@
 From 64dad41bd5f563b8541443bf789ec05091b8a848 Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Sat, 10 Oct 2026 00:04:16 +0800
-Subject: [PATCH 38/39] feat(slides): render table cells (fills, text, grid
+Subject: [PATCH 38/40] feat(slides): render table cells (fills, text, grid
  lines) from a:tbl instead of placeholder
 
 ---
