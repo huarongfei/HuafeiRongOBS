@@ -1,0 +1,182 @@
+From fc3a0f7d8daf899c8910efdcc0d0551a447d75e5 Mon Sep 17 00:00:00 2001
+From: HuafeiRongOBS <dev@huafeirong.local>
+Date: Sat, 10 Oct 2026 00:29:59 +0800
+Subject: [PATCH 41/41] feat(slides): decode pictures via WIC to BGRA - real
+ image drawing in CPU preview and direct GPU texture upload
+
+---
+ frontend/cmake/ui-widgets.cmake      |   3 +
+ frontend/widgets/HFRDeckRender.cpp   | 103 ++++++++++++++++++++++++++-
+ frontend/widgets/HFRSlidesSource.cpp |   6 +-
+ 3 files changed, 108 insertions(+), 4 deletions(-)
+
+diff --git a/frontend/cmake/ui-widgets.cmake b/frontend/cmake/ui-widgets.cmake
+index 3948cce..46f8e40 100644
+--- a/frontend/cmake/ui-widgets.cmake
++++ b/frontend/cmake/ui-widgets.cmake
+@@ -127,3 +127,6 @@ find_package(ZLIB REQUIRED)
+ if(TARGET ZLIB::ZLIB)
+   target_link_libraries(obs-studio PRIVATE ZLIB::ZLIB)
+ endif()
++
++# HuafeiRongOBS: WIC 用于自研 PPT 引擎的图片解码
++target_link_libraries(obs-studio PRIVATE windowscodecs ole32)
+\ No newline at end of file
+diff --git a/frontend/widgets/HFRDeckRender.cpp b/frontend/widgets/HFRDeckRender.cpp
+index 080b65b..4d0571f 100644
+--- a/frontend/widgets/HFRDeckRender.cpp
++++ b/frontend/widgets/HFRDeckRender.cpp
+@@ -10,6 +10,8 @@
+ #include <cstdio>
+ #include <cstring>
+ 
++#include <wincodec.h>
++
+ namespace hfr {
+ namespace {
+ 
+@@ -72,6 +74,77 @@ struct GdiText {
+ 	~GdiText() { Destroy(); }
+ };
+ 
++/* ---------------- WIC 图片解码（CPU 预览与纹理共用） ---------------- */
++bool DecodeImageToBgra(const std::vector<uint8_t> &data, std::vector<uint8_t> &out, int &w, int &h)
++{
++	if (data.empty()) {
++		return false;
++	}
++	static bool comInited = false;
++	if (!comInited) {
++		CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
++		comInited = true;
++	}
++	IWICImagingFactory *factory = nullptr;
++	HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
++	if (FAILED(hr) || !factory) {
++		return false;
++	}
++	IWICStream *stream = nullptr;
++	IWICBitmapDecoder *decoder = nullptr;
++	IWICBitmapFrameDecode *frame = nullptr;
++	IWICFormatConverter *conv = nullptr;
++	bool ok = false;
++	do {
++		if (FAILED(factory->CreateStream(&stream)) || !stream) {
++			break;
++		}
++		if (FAILED(stream->InitializeFromMemory(const_cast<BYTE *>(data.data()), (DWORD)data.size()))) {
++			break;
++		}
++		if (FAILED(factory->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) ||
++		    !decoder) {
++			break;
++		}
++		if (FAILED(decoder->GetFrame(0, &frame)) || !frame) {
++			break;
++		}
++		UINT ww = 0, hh = 0;
++		if (FAILED(frame->GetSize(&ww, &hh)) || ww == 0 || hh == 0) {
++			break;
++		}
++		if (FAILED(factory->CreateFormatConverter(&conv)) || !conv) {
++			break;
++		}
++		if (FAILED(conv->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0,
++					    WICBitmapPaletteTypeCustom))) {
++			break;
++		}
++		const UINT stride = ww * 4;
++		out.assign((size_t)stride * hh, 0);
++		if (FAILED(conv->CopyPixels(nullptr, stride, (UINT)out.size(), out.data()))) {
++			break;
++		}
++		w = (int)ww;
++		h = (int)hh;
++		ok = true;
++	} while (false);
++	if (conv) {
++		conv->Release();
++	}
++	if (frame) {
++		frame->Release();
++	}
++	if (decoder) {
++		decoder->Release();
++	}
++	if (stream) {
++		stream->Release();
++	}
++	factory->Release();
++	return ok;
++}
++
+ HFONT MakeFont(const std::wstring &face, int px, bool bold, bool italic)
+ {
+ 	LOGFONTW lf;
+@@ -257,10 +330,19 @@ void AddShape(const Shape &sh, const Deck &deck, double scale, double ptScale, i
+ 		it.w = w;
+ 		it.h = h;
+ 		it.rot60k = (int)sh.rot;
+-		it.pix = sh.imageData;
+-		it.ext = sh.imageExt;
+ 		it.debug = sh.name;
+ 		it.shapeIndex = shapeIndex;
++		/* 优先解码为 BGRA（CPU 预览与 GPU 纹理都直接用） */
++		std::vector<uint8_t> decoded;
++		int dw = 0, dh = 0;
++		if (DecodeImageToBgra(sh.imageData, decoded, dw, dh)) {
++			it.pix = std::move(decoded);
++			it.texW = dw;
++			it.texH = dh;
++		} else {
++			it.pix = sh.imageData; /* 退回：保留原始编码字节 */
++			it.ext = sh.imageExt;
++		}
+ 		out.items.push_back(std::move(it));
+ 		return;
+ 	}
+@@ -515,8 +597,23 @@ void CompositeToBgra(const RenderSlide &slide, std::vector<uint8_t> &bgra)
+ 					BlendPixel(bgra, W, x, y, it.color, 255);
+ 				}
+ 			}
++		} else if (it.kind == ItemKind::Picture && it.texW > 0 && it.texH > 0) {
++			/* 实绘（最近邻缩放） */
++			for (int y = 0; y < it.h; y++) {
++				const int sy = (int)((int64_t)y * it.texH / std::max(1, it.h));
++				for (int x = 0; x < it.w; x++) {
++					const int sx = (int)((int64_t)x * it.texW / std::max(1, it.w));
++					const size_t si = ((size_t)sy * (size_t)it.texW + (size_t)sx) * 4;
++					if (si + 3 >= it.pix.size()) {
++						continue;
++					}
++					const uint32_t c = 0xFF000000u | ((uint32_t)it.pix[si + 2] << 16) |
++							   ((uint32_t)it.pix[si + 1] << 8) | (uint32_t)it.pix[si + 0];
++					BlendPixel(bgra, W, it.x + x, it.y + y, c, 255);
++				}
++			}
+ 		} else if (it.kind == ItemKind::Picture || it.kind == ItemKind::Table) {
+-			/* 预览中占位：浅灰 */
++			/* 无法解码时的占位 */
+ 			for (int y = it.y; y < it.y + it.h; y++) {
+ 				for (int x = it.x; x < it.x + it.w; x++) {
+ 					if ((x - it.x) % 8 == 0 || (y - it.y) % 8 == 0) {
+diff --git a/frontend/widgets/HFRSlidesSource.cpp b/frontend/widgets/HFRSlidesSource.cpp
+index 6620605..79d32d1 100644
+--- a/frontend/widgets/HFRSlidesSource.cpp
++++ b/frontend/widgets/HFRSlidesSource.cpp
+@@ -244,7 +244,11 @@ static void hfr_slides_upload(HfrSlidesCtx *ctx)
+ 				g.tex = gs_texture_create((uint32_t)it.texW, (uint32_t)it.texH, GS_BGRA, 1, &data, 0);
+ 			}
+ 		} else if (it.kind == hfr::ItemKind::Picture) {
+-			if (!it.pix.empty()) {
++			if (!it.pix.empty() && it.texW > 0 && it.texH > 0) {
++				/* 已解码为 BGRA：直接建纹理 */
++				const uint8_t *data = it.pix.data();
++				g.tex = gs_texture_create((uint32_t)it.texW, (uint32_t)it.texH, GS_BGRA, 1, &data, 0);
++			} else if (!it.pix.empty()) {
+ 				QString ext = it.ext.empty() ? QStringLiteral("png") : QString::fromStdWString(it.ext);
+ 				const QString tmp = cache + QStringLiteral("/img_") + QString::number(ctx->gpu.size()) +
+ 						    QStringLiteral(".") + ext;
+-- 
+2.56.0.windows.2
+

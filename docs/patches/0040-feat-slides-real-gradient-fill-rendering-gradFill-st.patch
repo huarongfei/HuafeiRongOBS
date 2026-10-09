@@ -1,7 +1,7 @@
 From e0b1921b6a271b5797fd4ed5189043426e8d7d5d Mon Sep 17 00:00:00 2001
 From: HuafeiRongOBS <dev@huafeirong.local>
 Date: Sat, 10 Oct 2026 00:27:01 +0800
-Subject: [PATCH 40/40] feat(slides): real gradient fill rendering (gradFill
+Subject: [PATCH 40/41] feat(slides): real gradient fill rendering (gradFill
  stops + angle, CPU gradient texture, GPU draw)
 
 ---
